@@ -1,9 +1,17 @@
 ﻿import { context, getWebViewMode } from "@devvit/web/client";
-import { StrictMode, type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { StrictMode, type PointerEvent as ReactPointerEvent, type SyntheticEvent as ReactSyntheticEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { API_ROUTES, postJson } from "../shared/api";
+import {
+  API_ROUTES,
+  postJson,
+  type InviteLobbyResponse,
+  type LobbyResponse,
+  type PvpLobbyResponse,
+  type PvpLobbyStartResponse,
+} from "../shared/api";
 import { getCardPreview } from "../shared/cards";
 import {
+  type EventUnitState,
   JUDGE_COL,
   normalizeUsername,
   type FactionId,
@@ -12,6 +20,8 @@ import {
   type MatchState,
   type PlayCardTarget,
   type PlayerSide,
+  type PvpLobbyState,
+  type PvpLobbySummary,
   type TutorialScenarioId,
 } from "../shared/game";
 import { isJudgeCorruptSpecialistCard, isJudgePositiveSpecialistCard, isJudgeSpecialistCard, isStrictBackOnly } from "../shared/placement";
@@ -23,6 +33,14 @@ type UiContext = {
   userId: string;
   username: string;
   clientName: "ANDROID" | "IOS" | "WEB";
+};
+
+type InspectEventDetails = {
+  name: string;
+  typeLabel: string;
+  statsLabel: string;
+  effectLabel: string;
+  statusLabel?: string;
 };
 
 type LeaderboardRow = {
@@ -163,6 +181,35 @@ function roleLabel(role: "offensive" | "defensive" | "bureaucrat" | "utility"): 
   return "utility";
 }
 
+function eventInspectDetails(eventUnit: EventUnitState): InspectEventDetails {
+  if (eventUnit.kind === "iron_curtain") {
+    const lane = eventUnit.blockedLane === "front" ? "front" : "back";
+    return {
+      name: "Iron Curtain",
+      typeLabel: "event · disruption",
+      statsLabel: `hp ${eventUnit.health} · col ${eventUnit.col + 1}`,
+      effectLabel: `Blocks ${lane} lane in this column for its owner until destroyed.`,
+      statusLabel: `Owned by Side ${eventUnit.ownerSide ?? "?"}`,
+    };
+  }
+
+  return {
+    name: eventUnit.name || "Event Unit",
+    typeLabel: "event · neutral",
+    statsLabel: `hp ${eventUnit.health} · reward ${eventUnit.rewardShares} shares/${eventUnit.rewardFavor} favor`,
+    effectLabel: "Neutral objective. Destroy it to claim its reward.",
+  };
+}
+
+function judgeInspectDetails(): InspectEventDetails {
+  return {
+    name: "Judge Influence",
+    typeLabel: "core slot · judge",
+    statsLabel: "Center column authority node",
+    effectLabel: "Cast non-unit cards here and trigger judge-related mechanics.",
+  };
+}
+
 type UnitStatusTokenKey = "shield" | "atk-down" | "stun" | "exposed";
 type UnitStatusToken = {
   key: UnitStatusTokenKey;
@@ -229,12 +276,66 @@ function StatusChips({ unit, turn }: { unit: MatchState["units"][string]; turn: 
   );
 }
 
-function targetHint(rule: "none" | "ally-unit" | "enemy-unit" | "ally-unit-or-leader" | "enemy-unit-or-leader"): string {
-  if (rule === "ally-unit") return "Select a friendly unit.";
-  if (rule === "enemy-unit") return "Select an enemy unit.";
-  if (rule === "ally-unit-or-leader") return "Select a friendly unit or your leader.";
-  if (rule === "enemy-unit-or-leader") return "Select an enemy unit or enemy leader.";
-  return "";
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function streetEffectText(text: string): string {
+  let out = oneLine(text).replace(/^Effect:\s*/i, "");
+  const replacements: Array<[RegExp, string]> = [
+    [/\bdeploy\b/gi, "play"],
+    [/\bfront row\b/gi, "front line"],
+    [/\bback row\b/gi, "back line"],
+    [/\bally unit\b/gi, "your unit"],
+    [/\benemy unit\b/gi, "opponent unit"],
+    [/\bally leader\b/gi, "your leader"],
+    [/\benemy leader\b/gi, "opponent leader"],
+    [/\bjudge green slot\b/gi, "Green Judge slot"],
+    [/\bjudge blue slot\b/gi, "Blue Judge slot"],
+    [/\bprobation\b/gi, "Judge heat"],
+  ];
+  for (const [pattern, replacement] of replacements) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
+function streetResistanceText(text: string): string {
+  const cleaned = oneLine(text).replace(/^Resistance:\s*/i, "");
+  if (/n\/a|non-unit/i.test(cleaned)) {
+    return "No armor tricks here. This card wins with timing.";
+  }
+  return `Toughness: ${cleaned}.`;
+}
+
+function streetLoreText(flavorText: string): string {
+  const cleaned = oneLine(flavorText);
+  if (!cleaned) {
+    return "Simple plan: play it at the right time and cash the tempo.";
+  }
+  return cleaned;
+}
+
+function applyArtFallback(event: ReactSyntheticEvent<HTMLImageElement>): void {
+  const image = event.currentTarget;
+  const chainRaw = image.dataset.fallbackChain ?? "";
+  const chain = chainRaw.length > 0 ? chainRaw.split("|").filter((src) => src.length > 0) : [];
+  const fallbackSrc = image.dataset.fallbackSrc;
+  if (fallbackSrc) {
+    chain.unshift(fallbackSrc);
+  }
+  const currentSrc = image.getAttribute("src") ?? "";
+  const indexRaw = image.dataset.fallbackIndex ?? "0";
+  const parsedIndex = Number(indexRaw);
+  let nextIndex = Number.isFinite(parsedIndex) ? parsedIndex : 0;
+  while (nextIndex < chain.length && chain[nextIndex] === currentSrc) {
+    nextIndex += 1;
+  }
+  if (nextIndex >= chain.length) {
+    return;
+  }
+  image.dataset.fallbackIndex = String(nextIndex + 1);
+  image.src = chain[nextIndex] ?? currentSrc;
 }
 
 type CardPreview = ReturnType<typeof getCardPreview>;
@@ -304,6 +405,7 @@ export function GameApp() {
   const [selectedTutorialScenario, setSelectedTutorialScenario] = useState<TutorialScenarioId>("core_basics_v1");
 
   const [pendingInvites, setPendingInvites] = useState<InviteState[]>([]);
+  const [pvpLobbies, setPvpLobbies] = useState<PvpLobbySummary[]>([]);
   const [quickMatches, setQuickMatches] = useState<LobbyMatchSummary[]>([]);
   const [pvpMatches, setPvpMatches] = useState<LobbyMatchSummary[]>([]);
   const [tutorialMatches, setTutorialMatches] = useState<LobbyMatchSummary[]>([]);
@@ -320,12 +422,14 @@ export function GameApp() {
 
   const [inviteTarget, setInviteTarget] = useState("");
   const [selectedFaction, setSelectedFaction] = useState<FactionId>("market_makers");
+  const [selectedPvpFaction, setSelectedPvpFaction] = useState<FactionId>("market_makers");
+  const [activePvpLobby, setActivePvpLobby] = useState<PvpLobbyState | null>(null);
+  const [pvpJoinPulse, setPvpJoinPulse] = useState(false);
   const [match, setMatch] = useState<MatchState | null>(null);
   const [selectedHandIndex, setSelectedHandIndex] = useState<number | null>(null);
   const [mulliganPick, setMulliganPick] = useState<number[]>([]);
 
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
-  const [artFailures, setArtFailures] = useState<Record<string, boolean>>({});
   const [dragAttack, setDragAttack] = useState<DragAttackState | null>(null);
   const [armedAttackerUnitId, setArmedAttackerUnitId] = useState<string | null>(null);
   const boardFitRef = useRef<HTMLDivElement | null>(null);
@@ -337,8 +441,11 @@ export function GameApp() {
   const [enemyThinking, setEnemyThinking] = useState(false);
   const [allyInspectCardId, setAllyInspectCardId] = useState<string | null>(null);
   const [enemyInspectUnitId, setEnemyInspectUnitId] = useState<string | null>(null);
+  const [enemyInspectEventId, setEnemyInspectEventId] = useState<string | null>(null);
+  const [enemyInspectJudge, setEnemyInspectJudge] = useState(false);
   const [coachmarkPosition, setCoachmarkPosition] = useState<CoachmarkPosition | null>(null);
   const remoteAnimatingRef = useRef(false);
+  const pvpJoinedPrevRef = useRef(false);
   const matchRef = useRef<MatchState | null>(null);
   const battleShellRef = useRef<HTMLElement | null>(null);
 
@@ -346,7 +453,10 @@ export function GameApp() {
     setLoading(true);
     setError("");
 
-    const response = await postJson(API_ROUTES.lobby, {
+    const response = await postJson<
+      { weekId: string; postId: string; userId: string; username: string },
+      LobbyResponse
+    >(API_ROUTES.lobby, {
       weekId: ctx.weekId,
       postId: ctx.postId,
       userId: ctx.userId,
@@ -361,6 +471,7 @@ export function GameApp() {
     }
 
     setPendingInvites(response.data.snapshot.pendingInvites ?? []);
+    setPvpLobbies(response.data.snapshot.pvpLobbies ?? []);
     setQuickMatches(response.data.snapshot.quickPlayMatchSummaries ?? []);
     setPvpMatches(response.data.snapshot.pvpMatchSummaries ?? []);
     setTutorialMatches(response.data.snapshot.tutorialMatchSummaries ?? []);
@@ -465,13 +576,16 @@ export function GameApp() {
     setLoading(true);
     setError("");
 
-    const response = await postJson(API_ROUTES.inviteCreate, {
+    const response = await postJson<
+      { weekId: string; postId: string; userId: string; username: string; targetUsername: string; faction: FactionId },
+      InviteLobbyResponse
+    >(API_ROUTES.inviteCreate, {
       weekId: ctx.weekId,
       postId: ctx.postId,
       userId: ctx.userId,
       username: ctx.username,
       targetUsername: inviteTarget,
-      faction: selectedFaction,
+      faction: selectedPvpFaction,
     });
 
     setLoading(false);
@@ -483,6 +597,7 @@ export function GameApp() {
 
     setInviteTarget("");
     setInfo(`Invite sent to u/${response.data.invite.targetUsername}.`);
+    setActivePvpLobby(response.data.lobby);
     await loadLobby();
   }
 
@@ -490,23 +605,110 @@ export function GameApp() {
     setLoading(true);
     setError("");
 
-    const response = await postJson(API_ROUTES.inviteAccept, {
+    const response = await postJson<
+      { inviteId: string; userId: string; username: string; faction: FactionId },
+      InviteLobbyResponse
+    >(API_ROUTES.inviteAccept, {
       inviteId,
       userId: ctx.userId,
       username: ctx.username,
-      faction: selectedFaction,
+      faction: selectedPvpFaction,
     });
 
     setLoading(false);
 
-    if (!response.ok || !response.data.result.ok) {
-      setError(response.ok ? response.data.result.error ?? "Failed to accept invite." : response.error);
+    if (!response.ok) {
+      setError(response.error);
       return;
     }
 
-    setMatch(response.data.result.match);
-    setInfo("Invite accepted.");
+    setInfo("Invite accepted. Joined PvP lobby.");
+    setActivePvpLobby(response.data.lobby);
     setSelectedHandIndex(null);
+    await loadLobby();
+  }
+
+  async function openPvpLobby(lobbyId: string): Promise<void> {
+    const response = await postJson<{ lobbyId: string }, PvpLobbyResponse>(API_ROUTES.pvpLobbyGet, { lobbyId });
+    if (!response.ok) {
+      setError(response.error);
+      return;
+    }
+    setActivePvpLobby(response.data.lobby);
+  }
+
+  async function refreshActivePvpLobby(lobbyId: string): Promise<void> {
+    const response = await postJson<{ lobbyId: string }, PvpLobbyResponse>(API_ROUTES.pvpLobbyGet, { lobbyId });
+    if (!response.ok) {
+      setActivePvpLobby(null);
+      setError(response.error);
+      return;
+    }
+
+    const nextLobby = response.data.lobby;
+    if (nextLobby.matchId) {
+      setActivePvpLobby(null);
+      await refreshMatch(nextLobby.matchId, true);
+      await loadLobby();
+      return;
+    }
+
+    setActivePvpLobby(nextLobby);
+  }
+
+  async function startActivePvpLobby(): Promise<void> {
+    if (!activePvpLobby) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+
+    const response = await postJson<{ lobbyId: string; faction: FactionId }, PvpLobbyStartResponse>(API_ROUTES.pvpLobbyStart, {
+      lobbyId: activePvpLobby.id,
+      faction: selectedPvpFaction,
+    });
+
+    setLoading(false);
+
+    if (!response.ok) {
+      setError(response.error);
+      return;
+    }
+
+    if (response.data.result?.ok && response.data.result.match) {
+      setActivePvpLobby(null);
+      matchRef.current = response.data.result.match;
+      setMatch(response.data.result.match);
+      setSelectedHandIndex(null);
+      await loadLobby();
+      return;
+    }
+
+    const lobby = response.data.lobby;
+    const readyCount = Number(lobby.inviterReady) + Number(lobby.targetReady);
+    setInfo(`START GAME(${readyCount}/2) armed.`);
+    setActivePvpLobby(lobby);
+    await loadLobby();
+  }
+
+  async function dismantleActivePvpLobby(): Promise<void> {
+    if (!activePvpLobby) {
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    const response = await postJson<{ lobbyId: string }, { success: boolean }>(API_ROUTES.pvpLobbyDismantle, { lobbyId: activePvpLobby.id });
+    setLoading(false);
+
+    if (!response.ok) {
+      setError(response.error);
+      return;
+    }
+
+    setActivePvpLobby(null);
+    setInfo("Battle dismantled.");
+    await loadLobby();
   }
 
   async function runAction(route: string, action: Record<string, unknown>): Promise<void> {
@@ -571,6 +773,8 @@ export function GameApp() {
     setArmedAttackerUnitId(null);
     setAllyInspectCardId(null);
     setEnemyInspectUnitId(null);
+    setEnemyInspectEventId(null);
+    setEnemyInspectJudge(false);
     await loadLobby();
   }
 
@@ -799,6 +1003,9 @@ export function GameApp() {
     setExpandedCardId(null);
     setArmedAttackerUnitId(null);
     setAllyInspectCardId(cardId);
+    setEnemyInspectUnitId(null);
+    setEnemyInspectEventId(null);
+    setEnemyInspectJudge(false);
     centerHandCard(idx);
     if (selectedHandIndex === idx) {
       setExpandedCardId(cardId);
@@ -859,7 +1066,10 @@ export function GameApp() {
     if (enemyInspectUnitId && !match.units[enemyInspectUnitId]) {
       setEnemyInspectUnitId(null);
     }
-  }, [match, enemyInspectUnitId]);
+    if (enemyInspectEventId && !match.eventUnits[enemyInspectEventId]) {
+      setEnemyInspectEventId(null);
+    }
+  }, [match, enemyInspectUnitId, enemyInspectEventId]);
 
   useEffect(() => {
     if (!match) return;
@@ -869,6 +1079,36 @@ export function GameApp() {
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match?.id]);
+
+  useEffect(() => {
+    if (match || !activePvpLobby) return;
+    const id = window.setInterval(() => {
+      void refreshActivePvpLobby(activePvpLobby.id);
+    }, 1500);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [match?.id, activePvpLobby?.id]);
+
+  useEffect(() => {
+    const joinedNow = Boolean(activePvpLobby?.targetUserId);
+    const inviterUserId = activePvpLobby?.inviterUserId;
+    const hasLobby = Boolean(activePvpLobby?.id);
+    const joinedBefore = pvpJoinedPrevRef.current;
+    if (hasLobby && inviterUserId === ctx.userId && joinedNow && !joinedBefore) {
+      setInfo("Opponent joined lobby.");
+      setPvpJoinPulse(true);
+    }
+    pvpJoinedPrevRef.current = joinedNow;
+    if (!hasLobby) {
+      pvpJoinedPrevRef.current = false;
+    }
+  }, [activePvpLobby?.id, activePvpLobby?.targetUserId, activePvpLobby?.inviterUserId, ctx.userId]);
+
+  useEffect(() => {
+    if (!pvpJoinPulse) return;
+    const id = window.setTimeout(() => setPvpJoinPulse(false), 1200);
+    return () => window.clearTimeout(id);
+  }, [pvpJoinPulse]);
 
   useEffect(() => {
     if (!info) return;
@@ -914,6 +1154,13 @@ export function GameApp() {
     updateCenterHandIndex();
   }, [match?.id, match?.updatedAt]);
 
+  useEffect(() => {
+    setAllyInspectCardId(null);
+    setEnemyInspectUnitId(null);
+    setEnemyInspectEventId(null);
+    setEnemyInspectJudge(false);
+  }, [match?.id]);
+
   const mySide = match ? sideForUser(match, ctx.userId) : null;
   const enemySide = mySide ? enemyOf(mySide) : null;
   const myPlayer = mySide && match ? match.players[mySide] : null;
@@ -937,6 +1184,14 @@ export function GameApp() {
       : null;
   const enemyInspectCard = enemyInspectUnit ? getCardPreview(enemyInspectUnit.cardId) : null;
   const enemyInspectStatuses = enemyInspectUnit && match ? unitStatusTokens(enemyInspectUnit, match.turn) : [];
+  const enemyInspectEvent = enemyInspectEventId && match ? match.eventUnits[enemyInspectEventId] ?? null : null;
+  const enemyInspectEventDetails = enemyInspectEvent
+    ? eventInspectDetails(enemyInspectEvent)
+    : enemyInspectJudge
+      ? judgeInspectDetails()
+      : null;
+  const isFinished = Boolean(match?.status === "finished");
+  const didWin = Boolean(match && mySide && match.winnerSide === mySide);
   const selectedTargetRule = selectedCard?.targetRule ?? "none";
   const selectedCardIsUnit = selectedCard?.type === "unit";
   const canPlaySelected = Boolean(isMyTurn && mySide && myPlayer && selectedHandIndex !== null && selectedCardId);
@@ -996,6 +1251,17 @@ export function GameApp() {
 
   const showMulligan = Boolean(match && mySide && match.status === "mulligan" && !match.players[mySide].mulliganDone);
   const selectedFactionInfo = FACTIONS.find((f) => f.id === selectedFaction) ?? FACTIONS[0]!;
+  const selectedPvpFactionInfo = FACTIONS.find((f) => f.id === selectedPvpFaction) ?? FACTIONS[0]!;
+  const activePvpReadyCount = activePvpLobby ? Number(activePvpLobby.inviterReady) + Number(activePvpLobby.targetReady) : 0;
+  const activePvpIsInviter = Boolean(activePvpLobby && activePvpLobby.inviterUserId === ctx.userId);
+  const activePvpSelfReady = Boolean(activePvpLobby && (activePvpIsInviter ? activePvpLobby.inviterReady : activePvpLobby.targetReady));
+  const activePvpTargetJoined = Boolean(activePvpLobby?.targetUserId);
+  const activePvpCanStart = Boolean(activePvpLobby && activePvpTargetJoined && !activePvpLobby.matchId && !activePvpSelfReady);
+  const activePvpTitle = activePvpLobby
+    ? activePvpLobby.targetUserId
+      ? `${activePvpLobby.inviterUsername} vs ${activePvpLobby.targetUsername}`
+      : `${activePvpLobby.inviterUsername} vs waiting for opponent ${activePvpLobby.targetUsername}`
+    : "";
   const quickLeaderboardRows =
     quickLeaderboardLevel === 1 ? leaderboardPveByLevel.l1 : quickLeaderboardLevel === 2 ? leaderboardPveByLevel.l2 : leaderboardPveByLevel.l3;
   const tutorialState = match?.mode === "tutorial" ? match.tutorial : null;
@@ -1192,6 +1458,7 @@ export function GameApp() {
         {info ? <div className="status-toast info">{info}</div> : null}
 
         {!match ? (
+          <>
           <section className="lobby-screen">
             <header className="topbar lobby-topbar">
               <h1>Court of Capital</h1>
@@ -1251,7 +1518,7 @@ export function GameApp() {
                 </article>
 
                 <div className="lobby-side-grid">
-                  <article className="card-block small">
+                  <article className="card-block small resume-block">
                     <h3>Resume Match</h3>
                     <ul className="simple-list">
                       {quickMatches.length === 0 ? <li>No active AI matches.</li> : null}
@@ -1310,11 +1577,24 @@ export function GameApp() {
                     <h2>Invite PvP</h2>
                     <p className="subtle">Ping a username without `u/` and start a direct trial.</p>
                   </div>
+                  <div className="faction-picker faction-grid">
+                    {FACTIONS.map((f) => (
+                      <button
+                        key={`pvp-${f.id}`}
+                        className={`faction-btn faction-btn--rich ${selectedPvpFaction === f.id ? "active" : ""}`}
+                        onClick={() => setSelectedPvpFaction(f.id)}
+                      >
+                        <strong>{f.label}</strong>
+                        <span>{f.motto}</span>
+                        <small>{f.tone}</small>
+                      </button>
+                    ))}
+                  </div>
                   <div className="inline-input">
                     <input className="text-input" placeholder="username" value={inviteTarget} onChange={(e) => setInviteTarget(e.target.value)} />
                     <button className="action-btn action-btn--primary" onClick={() => void createInvite()} disabled={loading || inviteTarget.trim().length < 2}>Send</button>
                   </div>
-                  <p className="subtle">Selected deck: {selectedFactionInfo.label} · {selectedFactionInfo.motto}</p>
+                  <p className="subtle">Selected deck: {selectedPvpFactionInfo.label} · {selectedPvpFactionInfo.motto}</p>
                 </article>
 
                 <div className="lobby-side-grid">
@@ -1332,6 +1612,23 @@ export function GameApp() {
                   </article>
 
                   <article className="card-block small">
+                    <h3>Open Lobbies</h3>
+                    <ul className="simple-list">
+                      {pvpLobbies.length === 0 ? <li>No open lobbies.</li> : null}
+                      {pvpLobbies.map((lobby) => (
+                        <li key={lobby.lobbyId}>
+                          <span>
+                            {lobby.targetJoined
+                              ? `${maskResumeName(lobby.inviterUsername)} vs ${maskResumeName(lobby.targetUsername)}`
+                              : `${maskResumeName(lobby.inviterUsername)} vs waiting ${maskResumeName(lobby.targetUsername)}`} · START GAME({lobby.readyCount}/2)
+                          </span>
+                          <button className="action-btn" onClick={() => void openPvpLobby(lobby.lobbyId)}>Open</button>
+                        </li>
+                      ))}
+                    </ul>
+                  </article>
+
+                  <article className="card-block small resume-block">
                     <h3>Resume Match</h3>
                     <ul className="simple-list">
                       {pvpMatches.length === 0 ? <li>No active PvP matches.</li> : null}
@@ -1390,7 +1687,7 @@ export function GameApp() {
                 </article>
 
                 <div className="lobby-side-grid">
-                  <article className="card-block small">
+                  <article className="card-block small resume-block">
                     <h3>Resume Tutorial</h3>
                     <ul className="simple-list">
                       {tutorialMatches.length === 0 ? <li>No active tutorial match.</li> : null}
@@ -1421,6 +1718,47 @@ export function GameApp() {
               </>
             ) : null}
           </section>
+          {activePvpLobby ? (
+            <div className="pvp-lobby-overlay">
+              <article className="pvp-lobby-popup card-block">
+                <div className="panel-head">
+                  <h2>PvP Lobby</h2>
+                  <p className="subtle">{activePvpTitle}</p>
+                </div>
+                <div className="status-row">
+                  <span className="badge">Ready {activePvpReadyCount}/2</span>
+                  <span className="badge">{activePvpIsInviter ? "Host" : "Guest"}</span>
+                  <span className={`badge pvp-joined-badge ${pvpJoinPulse ? "joined-pulse" : ""}`}>
+                    {activePvpTargetJoined ? "Opponent joined" : "Waiting for opponent"}
+                  </span>
+                </div>
+                <div className="queue-grid pvp-lobby-actions">
+                  <button
+                    className="action-btn action-btn--primary"
+                    disabled={loading || !activePvpCanStart}
+                    onClick={() => void startActivePvpLobby()}
+                  >
+                    START GAME({activePvpReadyCount}/2)
+                  </button>
+                  <button
+                    className="action-btn secondary"
+                    onClick={() => {
+                      setActivePvpLobby(null);
+                      void loadLobby();
+                    }}
+                  >
+                    LEAVE LOBBY
+                  </button>
+                  {activePvpIsInviter ? (
+                    <button className="action-btn secondary" onClick={() => void dismantleActivePvpLobby()}>
+                      DISMANTLE BATTLE
+                    </button>
+                  ) : null}
+                </div>
+              </article>
+            </div>
+          ) : null}
+          </>
         ) : (
           <section className="battle-shell landscape" ref={battleShellRef}>
             <div className="battle-screen">
@@ -1443,6 +1781,8 @@ export function GameApp() {
                       setArmedAttackerUnitId(null);
                       setAllyInspectCardId(null);
                       setEnemyInspectUnitId(null);
+                      setEnemyInspectEventId(null);
+                      setEnemyInspectJudge(false);
                       void loadLobby();
                     }}
                   >
@@ -1533,6 +1873,8 @@ export function GameApp() {
                               return;
                             }
                             setEnemyInspectUnitId(unitId);
+                            setEnemyInspectEventId(null);
+                            setEnemyInspectJudge(false);
                           }}
                         >
                           {unitId && match.units[unitId] ? (
@@ -1569,6 +1911,8 @@ export function GameApp() {
                               return;
                             }
                             setEnemyInspectUnitId(unitId);
+                            setEnemyInspectEventId(null);
+                            setEnemyInspectJudge(false);
                           }}
                         >
                           {unitId && match.units[unitId] ? (
@@ -1598,11 +1942,23 @@ export function GameApp() {
                                 castSelectedWithoutTarget();
                                 return;
                               }
-                              tryAttackTarget({ kind: "judge" });
+                              if (armedAttackerUnitId && isMyTurn) {
+                                tryAttackTarget({ kind: "judge" });
+                                return;
+                              }
+                              setEnemyInspectJudge(true);
+                              setEnemyInspectUnitId(null);
+                              setEnemyInspectEventId(null);
                               return;
                             }
                             if (eventId) {
-                              tryAttackTarget({ kind: "event", eventUnitId: eventId });
+                              if (armedAttackerUnitId && isMyTurn) {
+                                tryAttackTarget({ kind: "event", eventUnitId: eventId });
+                                return;
+                              }
+                              setEnemyInspectEventId(eventId);
+                              setEnemyInspectJudge(false);
+                              setEnemyInspectUnitId(null);
                             }
                           }}
                         >
@@ -1660,6 +2016,9 @@ export function GameApp() {
                               }
                               setAllyInspectCardId(match.units[unitId]?.cardId ?? null);
                               setSelectedHandIndex(null);
+                              setEnemyInspectUnitId(null);
+                              setEnemyInspectEventId(null);
+                              setEnemyInspectJudge(false);
                               setArmedAttackerUnitId((prev) => (prev === unitId ? null : unitId));
                             }}
                             onPointerDown={(e) => {
@@ -1723,6 +2082,9 @@ export function GameApp() {
                               }
                               setAllyInspectCardId(match.units[unitId]?.cardId ?? null);
                               setSelectedHandIndex(null);
+                              setEnemyInspectUnitId(null);
+                              setEnemyInspectEventId(null);
+                              setEnemyInspectJudge(false);
                               setArmedAttackerUnitId((prev) => (prev === unitId ? null : unitId));
                             }}
                             onPointerDown={(e) => {
@@ -1775,8 +2137,16 @@ export function GameApp() {
                           <p>Effect: {enemyInspectCard.effectText}</p>
                           <p>{enemyInspectCard.resistanceText}</p>
                         </>
+                      ) : enemyInspectEventDetails ? (
+                        <>
+                          <h4>{enemyInspectEventDetails.name}</h4>
+                          <p>{enemyInspectEventDetails.typeLabel}</p>
+                          <p>{enemyInspectEventDetails.statsLabel}</p>
+                          {enemyInspectEventDetails.statusLabel ? <p>{enemyInspectEventDetails.statusLabel}</p> : null}
+                          <p>Effect: {enemyInspectEventDetails.effectLabel}</p>
+                        </>
                       ) : (
-                        <p>Tap enemy unit on board to inspect full card details.</p>
+                        <p>Tap enemy unit or middle-row slot to inspect full details.</p>
                       )}
                     </article>
                   </div>
@@ -1811,7 +2181,6 @@ export function GameApp() {
                             </div>
                             <div className="hand-card-meta">
                               <span className={`faction-chip ${card.faction}`}>{factionLabel(card.faction)}</span>
-                              <span className={`role-chip role-${card.role}`}>{roleLabel(card.role)}</span>
                               <span className="combat-chip">{card.attack ?? "-"} / {card.defense ?? "-"}</span>
                             </div>
                           </button>
@@ -1874,10 +2243,11 @@ export function GameApp() {
                           <p>
                             {selectedCard.name} · {factionLabel(selectedCard.faction)} · atk {selectedCard.attack ?? "-"} · def {selectedCard.defense ?? "-"} · row {selectedCard.row}
                           </p>
-                          <p>{selectedCard.effectText}</p>
-                          <p>{selectedCard.resistanceText}</p>
-                          {selectedCard.targetRule !== "none" ? <p>{targetHint(selectedCard.targetRule)}</p> : null}
-                          {selectedCard.targetRule === "none" && selectedCard.type !== "unit" ? <p>Use Cast Card or tap Judge slot to resolve this effect.</p> : null}
+                          <p>
+                            {selectedCard.type === "unit" && (isJudgePositiveSpecialistCard(selectedCard.id) || isJudgeCorruptSpecialistCard(selectedCard.id))
+                              ? "Can be placed on Judge slot"
+                              : "Cannot be placed on Judge slot"}
+                          </p>
                         </>
                       ) : (
                         <>
@@ -1923,6 +2293,41 @@ export function GameApp() {
                 </div>
               </div>
             ) : null}
+            {isFinished ? (
+              <div className="match-end-overlay">
+                <article className="match-end-modal">
+                  <h2>{didWin ? "Victory" : "Defeat"}</h2>
+                  <p className="subtle">{match.winReason ? `Win condition: ${match.winReason}.` : "Match finished."}</p>
+                  <div className="status-row">
+                    <span className="badge">Mode {match.mode.toUpperCase()}</span>
+                    <span className="badge">Turn {match.turn}</span>
+                    {match.winnerSide ? <span className="badge">Winner Side {match.winnerSide}</span> : null}
+                  </div>
+                  <div className="queue-grid">
+                    <button
+                      className="action-btn action-btn--primary"
+                      onClick={() => {
+                        const nextTab: LobbyTab = match.mode === "pvp" ? "pvp" : match.mode === "tutorial" ? "tutorial" : "quick";
+                        setLobbyTab(nextTab);
+                        setMatch(null);
+                        setSelectedHandIndex(null);
+                        setMulliganPick([]);
+                        setExpandedCardId(null);
+                        setDragAttack(null);
+                        setArmedAttackerUnitId(null);
+                        setAllyInspectCardId(null);
+                        setEnemyInspectUnitId(null);
+                        setEnemyInspectEventId(null);
+                        setEnemyInspectJudge(false);
+                        void loadLobby();
+                      }}
+                    >
+                      {match.mode === "pvp" ? "Back to PvP Play" : "Back to Lobby"}
+                    </button>
+                  </div>
+                </article>
+              </div>
+            ) : null}
           </section>
         )}
 
@@ -1936,27 +2341,43 @@ export function GameApp() {
           <div className="full-preview-overlay" onClick={() => setExpandedCardId(null)}>
             <div className="full-preview" onClick={(e) => e.stopPropagation()}>
               <button className="close-btn" onClick={() => setExpandedCardId(null)}>Close</button>
-              <h2>{expandedCard.name}</h2>
-              <p className="subtle">{factionLabel(expandedCard.faction).toUpperCase()} · {expandedCard.type.toUpperCase()} · COST {expandedCard.costShares} · ROW {expandedCard.row}</p>
-              {artFailures[expandedCard.id] ? (
-                <div className="art-placeholder">Missing art: {expandedCard.id}</div>
-              ) : (
-                <img
-                  className="full-art"
-                  src={expandedCard.artPath}
-                  alt={expandedCard.name}
-                  loading="lazy"
-                  onError={() => setArtFailures((prev) => ({ ...prev, [expandedCard.id]: true }))}
-                />
-              )}
-              <div className="full-stats">
-                <span>attack: {expandedCard.attack ?? "-"}</span>
-                <span>def: {expandedCard.defense ?? "-"}</span>
-                <span>dirty: {expandedCard.dirtyPower}</span>
+              <div className="full-preview-head">
+                <h2>{expandedCard.name}</h2>
+                <p className="subtle">{factionLabel(expandedCard.faction).toUpperCase()} · {expandedCard.type.toUpperCase()} · COST {expandedCard.costShares} · ROW {expandedCard.row}</p>
               </div>
-              <p>Effect: {expandedCard.effectText}</p>
-              <p>{expandedCard.resistanceText}</p>
-              {expandedCard.flavorText ? <p>Lore: {expandedCard.flavorText}</p> : null}
+              <div className="full-preview-main">
+                <div className="full-art-wrap">
+                  <img
+                    key={expandedCard.id}
+                    className="full-art"
+                    src={expandedCard.artPath}
+                    data-fallback-src={expandedCard.artFallbackPath}
+                    data-fallback-chain={expandedCard.artFallbackPaths.join("|")}
+                    alt={expandedCard.name}
+                    loading="lazy"
+                    onError={applyArtFallback}
+                  />
+                </div>
+                <div className="full-card-data">
+                  <div className="full-stats">
+                    <span>ATK {expandedCard.attack ?? "-"}</span>
+                    <span>HP {expandedCard.defense ?? "-"}</span>
+                    <span>DIRTY {expandedCard.dirtyPower}</span>
+                  </div>
+                  <p className="full-copy"><strong>Card impact:</strong> {streetEffectText(expandedCard.effectText)}</p>
+                  <p className="full-copy"><strong>Survival:</strong> {streetResistanceText(expandedCard.resistanceText)}</p>
+                </div>
+              </div>
+              <div className="full-preview-foot">
+                <article className="full-copy-block">
+                  <h3>Street read</h3>
+                  <p>{streetLoreText(expandedCard.flavorText)}</p>
+                </article>
+                <article className="full-copy-block">
+                  <h3>Full effect text</h3>
+                  <p>{expandedCard.effectText}</p>
+                </article>
+              </div>
             </div>
           </div>
         ) : null}

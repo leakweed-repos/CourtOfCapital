@@ -6,6 +6,9 @@ import { getUnitResistanceSummary } from "./resistance";
 
 type CardRow = "1" | "2" | "1/2";
 
+export const DEFAULT_CARD_ART_PATH = "/public/assets/cards/fallback_default.png";
+const ALT_DEFAULT_CARD_ART_PATH = "/assets/cards/fallback_default.png";
+
 export type CardPreviewMeta = {
   id: string;
   name: string;
@@ -24,6 +27,8 @@ export type CardPreviewMeta = {
   targetRule: CardTargetRule;
   traits: CardDefinition["traits"];
   artPath: string;
+  artFallbackPath: string;
+  artFallbackPaths: string[];
 };
 
 function rowFromTraits(cardId: string, traits: CardDefinition["traits"]): CardRow {
@@ -32,10 +37,40 @@ function rowFromTraits(cardId: string, traits: CardDefinition["traits"]): CardRo
   return "1/2";
 }
 
+function buildArtPaths(card: CardDefinition): { artPath: string; artFallbackPath: string; artFallbackPaths: string[] } {
+  const preferredSvg = `/public/assets/cards/${card.faction}/${card.id}.svg`;
+  const preferredPng = `/public/assets/cards/${card.faction}/${card.id}.png`;
+  const rootSvg = `/public/assets/cards/${card.id}.svg`;
+  const rootPng = `/public/assets/cards/${card.id}.png`;
+  const altSvg = `/assets/cards/${card.faction}/${card.id}.svg`;
+  const altPng = `/assets/cards/${card.faction}/${card.id}.png`;
+  const altRootSvg = `/assets/cards/${card.id}.svg`;
+  const altRootPng = `/assets/cards/${card.id}.png`;
+
+  const fallbackPaths = [
+    preferredPng,
+    rootSvg,
+    rootPng,
+    altSvg,
+    altPng,
+    altRootSvg,
+    altRootPng,
+    DEFAULT_CARD_ART_PATH,
+    ALT_DEFAULT_CARD_ART_PATH,
+  ];
+
+  return {
+    artPath: preferredSvg,
+    artFallbackPath: fallbackPaths[0] ?? DEFAULT_CARD_ART_PATH,
+    artFallbackPaths: fallbackPaths,
+  };
+}
+
 export const CARD_PREVIEW: Record<string, CardPreviewMeta> = Object.fromEntries(
   Object.values(CARD_LIBRARY).map((card) => {
     const effect = getCardEffectDescriptor(card.id);
     const flavorText = card.text.trim();
+    const art = buildArtPaths(card);
     return [
       card.id,
       {
@@ -55,7 +90,9 @@ export const CARD_PREVIEW: Record<string, CardPreviewMeta> = Object.fromEntries(
         text: effect.summary,
         targetRule: effect.targetRule,
         traits: card.traits,
-        artPath: `/assets/cards/${card.id}.png`,
+        artPath: art.artPath,
+        artFallbackPath: art.artFallbackPath,
+        artFallbackPaths: art.artFallbackPaths,
       } satisfies CardPreviewMeta,
     ];
   }),
@@ -80,7 +117,9 @@ export function getCardPreview(cardId: string): CardPreviewMeta {
       text: "Card metadata missing.",
       targetRule: "none",
       traits: [],
-      artPath: "/assets/cards/placeholder.png",
+      artPath: DEFAULT_CARD_ART_PATH,
+      artFallbackPath: DEFAULT_CARD_ART_PATH,
+      artFallbackPaths: [ALT_DEFAULT_CARD_ART_PATH],
     }
   );
 }

@@ -6,6 +6,7 @@ import type {
   MatchState,
   MulliganInput,
   PlayCardInput,
+  PvpLobbyState,
   RepositionJudgeInput,
   TutorialScenarioId,
   WeeklyUserStats,
@@ -59,6 +60,19 @@ export interface AcceptInviteRequest {
   faction?: FactionId;
 }
 
+export interface PvpLobbyQuery {
+  lobbyId: string;
+}
+
+export interface PvpLobbyStartRequest {
+  lobbyId: string;
+  faction?: FactionId;
+}
+
+export interface PvpLobbyDismantleRequest {
+  lobbyId: string;
+}
+
 export interface MatchQuery {
   matchId: string;
 }
@@ -94,6 +108,20 @@ export interface InviteResponse {
   invite: InviteState;
 }
 
+export interface InviteLobbyResponse {
+  invite: InviteState;
+  lobby: PvpLobbyState;
+}
+
+export interface PvpLobbyResponse {
+  lobby: PvpLobbyState;
+}
+
+export interface PvpLobbyStartResponse {
+  lobby: PvpLobbyState;
+  result?: MatchActionResult;
+}
+
 export interface MatchResponse {
   result: MatchActionResult;
 }
@@ -110,6 +138,9 @@ export const API_ROUTES = {
   tutorialSkip: "/api/tutorial/skip",
   inviteCreate: "/api/match/invite",
   inviteAccept: "/api/invite/accept",
+  pvpLobbyGet: "/api/pvp/lobby/get",
+  pvpLobbyStart: "/api/pvp/lobby/start",
+  pvpLobbyDismantle: "/api/pvp/lobby/dismantle",
   matchGet: "/api/match/get",
   matchMulligan: "/api/match/mulligan",
   matchPlay: "/api/match/play",

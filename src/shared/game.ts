@@ -6,6 +6,7 @@ export const MAX_HAND_SIZE = 20;
 export const DECK_SIZE = 100;
 export const MULLIGAN_SECONDS = 10;
 export const TURN_SECONDS = 35;
+export const PVP_LOBBY_RESPONSE_TIMEOUT_MS = 15 * 60 * 1000;
 
 export const PREFIX = "coc:v1";
 
@@ -178,6 +179,43 @@ export interface InviteState {
   createdAt: number;
   acceptedAt?: number;
   matchId?: string;
+  lobbyId?: string;
+}
+
+export interface PvpLobbyState {
+  id: string;
+  inviteId: string;
+  weekId: string;
+  postId: string;
+  inviterUserId: string;
+  inviterUsername: string;
+  inviterFaction: FactionId;
+  targetUserId?: string;
+  targetUsername: string;
+  targetFaction?: FactionId;
+  inviterReady: boolean;
+  targetReady: boolean;
+  status: "waiting" | "ready" | "started" | "cancelled";
+  createdAt: number;
+  updatedAt: number;
+  matchId?: string;
+}
+
+export interface PvpLobbySummary {
+  lobbyId: string;
+  inviteId: string;
+  status: PvpLobbyState["status"];
+  inviterUsername: string;
+  targetUsername: string;
+  inviterFaction: FactionId;
+  targetFaction?: FactionId;
+  targetJoined: boolean;
+  readyCount: 0 | 1 | 2;
+  isInviter: boolean;
+  selfReady: boolean;
+  canStart: boolean;
+  matchId?: string;
+  updatedAt: number;
 }
 
 export interface WeeklyUserStats {
@@ -207,6 +245,7 @@ export interface LobbySnapshot {
   weekId: string;
   postId: string;
   pendingInvites: InviteState[];
+  pvpLobbies: PvpLobbySummary[];
   quickPlayMatchSummaries: LobbyMatchSummary[];
   pvpMatchSummaries: LobbyMatchSummary[];
   tutorialMatchSummaries: LobbyMatchSummary[];

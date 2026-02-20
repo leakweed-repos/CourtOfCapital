@@ -1,6 +1,6 @@
 import type { RedisClient } from "@devvit/web/server";
 import { PREFIX, calcRatio, leaderboardScore } from "../../shared/game";
-import type { InviteState, MatchState, WeeklyUserStats } from "../../shared/game";
+import type { InviteState, MatchState, PvpLobbyState, WeeklyUserStats } from "../../shared/game";
 
 export type LeaderboardBucket = "all" | "pvp" | "pve_l1" | "pve_l2" | "pve_l3";
 
@@ -104,6 +104,14 @@ function keyPendingInvitesForUsername(username: string): string {
   return `${PREFIX}:usern:${username}:invites:pending`;
 }
 
+function keyPvpLobby(lobbyId: string): string {
+  return `${PREFIX}:pvp:lobby:${lobbyId}`;
+}
+
+function keyUserPvpLobbies(userId: string): string {
+  return `${PREFIX}:user:${userId}:pvp:lobbies`;
+}
+
 export async function getCurrentWeekId(redis: RedisLike): Promise<string | null> {
   return redis.get(keyCurrentWeek());
 }
@@ -172,6 +180,38 @@ export async function listPendingInvites(redis: RedisLike, targetUsername: strin
     }
   }
   return out.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+export async function savePvpLobby(redis: RedisLike, lobby: PvpLobbyState): Promise<void> {
+  await redis.set(keyPvpLobby(lobby.id), JSON.stringify(lobby));
+}
+
+export async function getPvpLobby(redis: RedisLike, lobbyId: string): Promise<PvpLobbyState | null> {
+  const raw = await redis.get(keyPvpLobby(lobbyId));
+  if (!raw) {
+    return null;
+  }
+  return JSON.parse(raw) as PvpLobbyState;
+}
+
+export async function indexPvpLobbyForUser(redis: RedisLike, userId: string, lobbyId: string): Promise<void> {
+  await redis.sAdd(keyUserPvpLobbies(userId), lobbyId);
+}
+
+export async function unindexPvpLobbyForUser(redis: RedisLike, userId: string, lobbyId: string): Promise<void> {
+  await redis.sRem(keyUserPvpLobbies(userId), lobbyId);
+}
+
+export async function listUserPvpLobbyIds(redis: RedisLike, userId: string): Promise<string[]> {
+  return redis.sMembers(keyUserPvpLobbies(userId));
+}
+
+export async function deletePvpLobby(redis: RedisLike, lobby: PvpLobbyState): Promise<void> {
+  await redis.del(keyPvpLobby(lobby.id));
+  await unindexPvpLobbyForUser(redis, lobby.inviterUserId, lobby.id);
+  if (lobby.targetUserId) {
+    await unindexPvpLobbyForUser(redis, lobby.targetUserId, lobby.id);
+  }
 }
 
 export async function incrementWeekMatchCount(redis: RedisLike, weekId: string): Promise<void> {

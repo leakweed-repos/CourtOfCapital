@@ -5,6 +5,9 @@ import {
   normalizeUsername,
   nowTs,
   opponentOf,
+  PVP_LOBBY_RESPONSE_TIMEOUT_MS,
+  type PvpLobbyState,
+  type PvpLobbySummary,
   stableHash,
   type TutorialScenarioId,
   uniqueId,
@@ -32,13 +35,18 @@ import {
   getInvite,
   getLeaderboardTop,
   getMatch,
+  getPvpLobby,
   incrementWeekMatchCount,
+  indexPvpLobbyForUser,
   indexMatchForUser,
+  listUserPvpLobbyIds,
   listPendingInvites,
   listUserMatchIds,
   recordUserOutcome,
+  savePvpLobby,
   saveInvite,
   saveMatch,
+  deletePvpLobby,
   updateInvite,
   type RedisLike,
   type LeaderboardBucket,
@@ -103,6 +111,32 @@ function toLobbyMatchSummary(match: MatchState): LobbyMatchSummary {
     playerBUsername: match.players.B.username,
     playerBIsBot: match.players.B.isBot,
     tutorialScenarioId: match.tutorial?.scenarioId,
+  };
+}
+
+function toPvpLobbySummary(lobby: PvpLobbyState, actor: { userId: string; username: string }): PvpLobbySummary {
+  const isInviter = lobby.inviterUserId === actor.userId;
+  const isTarget = lobby.targetUserId === actor.userId || (!lobby.targetUserId && lobby.targetUsername === actor.username);
+  const selfReady = isInviter ? lobby.inviterReady : isTarget ? lobby.targetReady : false;
+  const readyCountRaw = Number(lobby.inviterReady) + Number(lobby.targetReady);
+  const readyCount = (readyCountRaw > 2 ? 2 : readyCountRaw) as 0 | 1 | 2;
+  const targetJoined = Boolean(lobby.targetUserId);
+  const canStart = targetJoined && !lobby.matchId && lobby.status !== "cancelled";
+  return {
+    lobbyId: lobby.id,
+    inviteId: lobby.inviteId,
+    status: lobby.status,
+    inviterUsername: lobby.inviterUsername,
+    targetUsername: lobby.targetUsername,
+    inviterFaction: lobby.inviterFaction,
+    targetFaction: lobby.targetFaction,
+    targetJoined,
+    readyCount,
+    isInviter,
+    selfReady,
+    canStart,
+    matchId: lobby.matchId,
+    updatedAt: lobby.updatedAt,
   };
 }
 
@@ -199,6 +233,27 @@ async function notifyInvite(invite: InviteState): Promise<void> {
   }
 }
 
+function isAwaitingLobbyTarget(lobby: PvpLobbyState): boolean {
+  return !lobby.targetUserId && !lobby.matchId && lobby.status !== "cancelled";
+}
+
+async function expireLobbyIfTimedOut(lobby: PvpLobbyState, now: number): Promise<boolean> {
+  if (!isAwaitingLobbyTarget(lobby)) {
+    return false;
+  }
+  if (now - lobby.createdAt < PVP_LOBBY_RESPONSE_TIMEOUT_MS) {
+    return false;
+  }
+
+  const invite = await getInvite(storageRedis, lobby.inviteId);
+  if (invite && invite.status === "pending") {
+    invite.status = "expired";
+    await updateInvite(storageRedis, invite);
+  }
+  await deletePvpLobby(storageRedis, lobby);
+  return true;
+}
+
 export const api = new Hono();
 
 api.post("/lobby", async (c) => {
@@ -212,12 +267,34 @@ api.post("/lobby", async (c) => {
     return fail(c, weekState.error, weekState.status);
   }
 
-  const invites = await listPendingInvites(storageRedis, actor.username);
+  const pendingInvites = await listPendingInvites(storageRedis, actor.username);
   const userMatchIds = await listUserMatchIds(storageRedis, actor.userId);
+  const userPvpLobbyIds = await listUserPvpLobbyIds(storageRedis, actor.userId);
+  const now = nowTs();
 
   const quickPlayMatchSummaries: LobbyMatchSummary[] = [];
   const pvpMatchSummaries: LobbyMatchSummary[] = [];
   const tutorialMatchSummaries: LobbyMatchSummary[] = [];
+  const pvpLobbies: PvpLobbySummary[] = [];
+  const invites: InviteState[] = [];
+
+  for (const invite of pendingInvites) {
+    if (!invite.lobbyId) {
+      invites.push(invite);
+      continue;
+    }
+    const lobby = await getPvpLobby(storageRedis, invite.lobbyId);
+    if (!lobby) {
+      invite.status = "expired";
+      await updateInvite(storageRedis, invite);
+      continue;
+    }
+    const expired = await expireLobbyIfTimedOut(lobby, now);
+    if (!expired) {
+      invites.push(invite);
+    }
+  }
+
   for (const matchId of userMatchIds) {
     const raw = await getMatch(storageRedis, matchId);
     if (!raw) {
@@ -249,6 +326,28 @@ api.post("/lobby", async (c) => {
   pvpMatchSummaries.sort((a, b) => b.updatedAt - a.updatedAt);
   tutorialMatchSummaries.sort((a, b) => b.updatedAt - a.updatedAt);
 
+  for (const lobbyId of userPvpLobbyIds) {
+    const lobby = await getPvpLobby(storageRedis, lobbyId);
+    if (!lobby) {
+      continue;
+    }
+    const expired = await expireLobbyIfTimedOut(lobby, now);
+    if (expired) {
+      continue;
+    }
+    if (lobby.status === "cancelled") {
+      continue;
+    }
+    if (lobby.weekId !== weekState.weekId || lobby.postId !== weekState.postId) {
+      continue;
+    }
+    if (lobby.matchId) {
+      continue;
+    }
+    pvpLobbies.push(toPvpLobbySummary(lobby, actor));
+  }
+  pvpLobbies.sort((a, b) => b.updatedAt - a.updatedAt);
+
   const [leaderboardPvp, leaderboardL1, leaderboardL2, leaderboardL3] = await Promise.all([
     getLeaderboardTop(storageRedis, weekState.weekId, 10, "pvp"),
     getLeaderboardTop(storageRedis, weekState.weekId, 10, "pve_l1"),
@@ -261,6 +360,7 @@ api.post("/lobby", async (c) => {
       weekId: weekState.weekId,
       postId: weekState.postId,
       pendingInvites: invites,
+      pvpLobbies,
       quickPlayMatchSummaries,
       pvpMatchSummaries,
       tutorialMatchSummaries,
@@ -389,6 +489,7 @@ api.post("/match/invite", async (c) => {
   }
 
   const now = nowTs();
+  const lobbyId = uniqueId("pvp_lobby", stableHash(`${actor.userId}:${targetUsername}:${now}`), 1);
   const invite: InviteState = {
     id: uniqueId("invite", stableHash(`${actor.userId}:${targetUsername}:${now}`), 1),
     weekId: weekState.weekId,
@@ -399,12 +500,31 @@ api.post("/match/invite", async (c) => {
     targetUsername,
     status: "pending",
     createdAt: now,
+    lobbyId,
+  };
+
+  const lobby: PvpLobbyState = {
+    id: lobbyId,
+    inviteId: invite.id,
+    weekId: weekState.weekId,
+    postId: weekState.postId,
+    inviterUserId: actor.userId,
+    inviterUsername: actor.username,
+    inviterFaction: body.faction ?? DEFAULT_FACTION,
+    targetUsername,
+    inviterReady: false,
+    targetReady: false,
+    status: "waiting",
+    createdAt: now,
+    updatedAt: now,
   };
 
   await saveInvite(storageRedis, invite);
+  await savePvpLobby(storageRedis, lobby);
+  await indexPvpLobbyForUser(storageRedis, actor.userId, lobby.id);
   await notifyInvite(invite);
 
-  return ok(c, { invite });
+  return ok(c, { invite, lobby });
 });
 
 api.post("/invite/accept", async (c) => {
@@ -423,8 +543,8 @@ api.post("/invite/accept", async (c) => {
   if (!invite) {
     return fail(c, "Invite not found.", 404);
   }
-  if (invite.status !== "pending") {
-    return fail(c, "Invite is not pending.");
+  if (invite.status !== "pending" && invite.status !== "accepted") {
+    return fail(c, "Invite is not active.");
   }
 
   if (invite.targetUsername !== actor.username) {
@@ -435,44 +555,217 @@ api.post("/invite/accept", async (c) => {
     return fail(c, "Invite belongs to an archived week/post.", 409);
   }
 
+  if (!invite.lobbyId) {
+    return fail(c, "Invite has no lobby metadata.", 409);
+  }
+
+  const lobby = await getPvpLobby(storageRedis, invite.lobbyId);
+  if (!lobby) {
+    return fail(c, "Lobby not found.", 404);
+  }
+  if (await expireLobbyIfTimedOut(lobby, nowTs())) {
+    return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
+  }
+  if (lobby.status === "cancelled") {
+    return fail(c, "Lobby has been dismantled.", 409);
+  }
+  if (lobby.matchId) {
+    return fail(c, "Lobby already started.", 409);
+  }
+  if (lobby.targetUsername !== actor.username) {
+    return fail(c, "Lobby target mismatch.", 403);
+  }
+  if (lobby.targetUserId && lobby.targetUserId !== actor.userId) {
+    return fail(c, "Lobby already joined by another user.", 409);
+  }
+
   const now = nowTs();
-  const match = createInitialMatch(
-    {
-      weekId: invite.weekId,
-      postId: invite.postId,
-      mode: "pvp",
-      playerA: {
-        userId: invite.inviterUserId,
-        username: invite.inviterUsername,
-        faction: invite.inviterFaction ?? DEFAULT_FACTION,
-      },
-      playerB: {
-        userId: actor.userId,
-        username: actor.username,
-        faction: body.faction ?? DEFAULT_FACTION,
-        isBot: false,
-      },
-      seed: freshMatchSeed(`${invite.id}:${actor.userId}:${now}`),
-    },
-    now,
-  );
+  lobby.targetUserId = actor.userId;
+  lobby.targetFaction = body.faction ?? lobby.targetFaction ?? DEFAULT_FACTION;
+  lobby.status = "waiting";
+  lobby.updatedAt = now;
 
   invite.status = "accepted";
-  invite.acceptedAt = now;
-  invite.matchId = match.id;
+  invite.acceptedAt = invite.acceptedAt ?? now;
 
   await updateInvite(storageRedis, invite);
-  await saveMatch(storageRedis, match);
-  await indexMatchForUser(storageRedis, invite.inviterUserId, match.id);
-  await indexMatchForUser(storageRedis, actor.userId, match.id);
+  await savePvpLobby(storageRedis, lobby);
+  await indexPvpLobbyForUser(storageRedis, actor.userId, lobby.id);
 
   return ok(c, {
     invite,
-    result: {
-      ok: true,
-      match,
-    } satisfies MatchActionResult,
+    lobby,
   });
+});
+
+api.post("/pvp/lobby/get", async (c) => {
+  const actor = requireActor();
+  if (!actor.ok) {
+    return fail(c, actor.error, actor.status);
+  }
+
+  const body = (await c.req.json()) as { lobbyId?: string };
+  if (!body.lobbyId) {
+    return fail(c, "Lobby id is required.");
+  }
+
+  const lobby = await getPvpLobby(storageRedis, body.lobbyId);
+  if (!lobby) {
+    return fail(c, "Lobby not found.", 404);
+  }
+  if (await expireLobbyIfTimedOut(lobby, nowTs())) {
+    return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
+  }
+
+  const allowed =
+    lobby.inviterUserId === actor.userId ||
+    lobby.targetUserId === actor.userId ||
+    (!lobby.targetUserId && lobby.targetUsername === actor.username);
+  if (!allowed) {
+    return fail(c, "You are not a member of this lobby.", 403);
+  }
+
+  return ok(c, { lobby });
+});
+
+api.post("/pvp/lobby/start", async (c) => {
+  const actor = requireActor();
+  if (!actor.ok) {
+    return fail(c, actor.error, actor.status);
+  }
+
+  const weekState = await ensureActivePost(storageRedis);
+  if (!weekState.ok) {
+    return fail(c, weekState.error, weekState.status);
+  }
+
+  const body = (await c.req.json()) as { lobbyId?: string; faction?: FactionId };
+  if (!body.lobbyId) {
+    return fail(c, "Lobby id is required.");
+  }
+
+  const lobby = await getPvpLobby(storageRedis, body.lobbyId);
+  if (!lobby) {
+    return fail(c, "Lobby not found.", 404);
+  }
+  if (await expireLobbyIfTimedOut(lobby, nowTs())) {
+    return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
+  }
+  if (lobby.status === "cancelled") {
+    return fail(c, "Lobby has been dismantled.", 409);
+  }
+  if (lobby.weekId !== weekState.weekId || lobby.postId !== weekState.postId) {
+    return fail(c, "Lobby belongs to an archived week/post.", 409);
+  }
+
+  const isInviter = lobby.inviterUserId === actor.userId;
+  const isTarget = lobby.targetUserId === actor.userId;
+  if (!isInviter && !isTarget) {
+    return fail(c, "You are not a member of this lobby.", 403);
+  }
+
+  if (!lobby.targetUserId) {
+    return fail(c, "Opponent has not joined this lobby yet.", 409);
+  }
+
+  const now = nowTs();
+  if (isInviter) {
+    lobby.inviterFaction = body.faction ?? lobby.inviterFaction;
+    lobby.inviterReady = true;
+  } else {
+    lobby.targetFaction = body.faction ?? lobby.targetFaction ?? DEFAULT_FACTION;
+    lobby.targetReady = true;
+  }
+
+  if (!lobby.matchId && lobby.inviterReady && lobby.targetReady) {
+    const match = createInitialMatch(
+      {
+        weekId: lobby.weekId,
+        postId: lobby.postId,
+        mode: "pvp",
+        playerA: {
+          userId: lobby.inviterUserId,
+          username: lobby.inviterUsername,
+          faction: lobby.inviterFaction,
+        },
+        playerB: {
+          userId: lobby.targetUserId,
+          username: lobby.targetUsername,
+          faction: lobby.targetFaction ?? DEFAULT_FACTION,
+          isBot: false,
+        },
+        seed: freshMatchSeed(`${lobby.id}:${lobby.targetUserId}:${now}`),
+      },
+      now,
+    );
+    lobby.matchId = match.id;
+    lobby.status = "started";
+    lobby.updatedAt = now;
+
+    await saveMatch(storageRedis, match);
+    await indexMatchForUser(storageRedis, lobby.inviterUserId, match.id);
+    await indexMatchForUser(storageRedis, lobby.targetUserId, match.id);
+
+    const invite = await getInvite(storageRedis, lobby.inviteId);
+    if (invite) {
+      invite.status = "accepted";
+      invite.acceptedAt = invite.acceptedAt ?? now;
+      invite.matchId = match.id;
+      await updateInvite(storageRedis, invite);
+    }
+
+    await savePvpLobby(storageRedis, lobby);
+
+    return ok(c, {
+      lobby,
+      result: {
+        ok: true,
+        match,
+      } satisfies MatchActionResult,
+    });
+  }
+
+  lobby.status = "ready";
+  lobby.updatedAt = now;
+  await savePvpLobby(storageRedis, lobby);
+  return ok(c, { lobby });
+});
+
+api.post("/pvp/lobby/dismantle", async (c) => {
+  const actor = requireActor();
+  if (!actor.ok) {
+    return fail(c, actor.error, actor.status);
+  }
+
+  const body = (await c.req.json()) as { lobbyId?: string };
+  if (!body.lobbyId) {
+    return fail(c, "Lobby id is required.");
+  }
+
+  const lobby = await getPvpLobby(storageRedis, body.lobbyId);
+  if (!lobby) {
+    return fail(c, "Lobby not found.", 404);
+  }
+  if (await expireLobbyIfTimedOut(lobby, nowTs())) {
+    return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
+  }
+  if (lobby.inviterUserId !== actor.userId) {
+    return fail(c, "Only inviter can dismantle this battle.", 403);
+  }
+  if (lobby.matchId) {
+    return fail(c, "Lobby already started, dismantle is no longer available.", 409);
+  }
+
+  lobby.status = "cancelled";
+  lobby.updatedAt = nowTs();
+  const invite = await getInvite(storageRedis, lobby.inviteId);
+  if (invite) {
+    invite.status = "cancelled";
+    await updateInvite(storageRedis, invite);
+  }
+  await deletePvpLobby(storageRedis, lobby);
+
+  return ok(c, { success: true });
 });
 
 api.post("/match/get", async (c) => {
