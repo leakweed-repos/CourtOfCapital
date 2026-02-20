@@ -307,6 +307,7 @@ function traitKeywords(card: CardDefinition): string[] {
   if (card.traits.includes("ranged")) out.push("Ranged (hits backline)");
   if (card.traits.includes("reach")) out.push("Reach (frontline can hit backline)");
   if (card.traits.includes("rush")) out.push("Rush (can attack same turn)");
+  if (card.traits.includes("flip")) out.push("Flip (replace friendly unit by paying +25% cost)");
   if (card.traits.includes("dirty")) out.push("Dirty (higher Judge catch risk)");
   if (card.traits.includes("prosecutor")) out.push("Prosecutor (Judge green synergy)");
   if (card.traits.includes("negotiator")) out.push("Negotiator (Judge green synergy)");
@@ -393,13 +394,29 @@ function withResistanceSummary(cardId: string, descriptor: CardEffectDescriptor)
   };
 }
 
+function withFlipSummary(cardId: string, descriptor: CardEffectDescriptor): CardEffectDescriptor {
+  const card = getCatalogCard(cardId);
+  if (card.type !== "unit" || !card.traits.includes("flip")) {
+    return descriptor;
+  }
+  if (descriptor.summary.includes("Flip:")) {
+    return descriptor;
+  }
+  return {
+    targetRule: descriptor.targetRule,
+    summary:
+      `${descriptor.summary} ` +
+      "Flip: deploy onto an occupied friendly slot for +25% cost. Displaced ally returns to hand (burns if full).",
+  };
+}
+
 export function getCardEffectDescriptor(cardId: string): CardEffectDescriptor {
   const special = SPECIAL_CARD_EFFECTS[cardId];
   if (special) {
-    return withResistanceSummary(cardId, withJudgeSummary(cardId, special));
+    return withResistanceSummary(cardId, withFlipSummary(cardId, withJudgeSummary(cardId, special)));
   }
   const card = getCatalogCard(cardId);
-  return withResistanceSummary(cardId, withJudgeSummary(cardId, defaultCardEffect(card)));
+  return withResistanceSummary(cardId, withFlipSummary(cardId, withJudgeSummary(cardId, defaultCardEffect(card))));
 }
 
 export function getCardRole(cardId: string): CardRole {

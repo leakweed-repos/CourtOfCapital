@@ -337,6 +337,22 @@ button {
   cursor: not-allowed;
 }
 
+.badge-btn {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  min-height: 24px;
+  background: linear-gradient(180deg, #1f3460, #182b4f);
+  color: #dce8ff;
+  font-size: 0.62rem;
+}
+
+.badge-btn.active {
+  border-color: #86acff;
+  background: linear-gradient(180deg, #355faffc, #274a8e);
+  color: #f1f6ff;
+}
+
 .text-input {
   width: 100%;
   background: #101b35;
@@ -591,6 +607,28 @@ button {
   color: #cfddfb;
 }
 
+.lobby-tabs {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.lobby-tab {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-height: 30px;
+  background: linear-gradient(180deg, rgba(33, 55, 95, 0.95), rgba(23, 40, 72, 0.98));
+  color: #d8e6ff;
+  font-size: 0.7rem;
+}
+
+.lobby-tab.active {
+  border-color: #7ea8ff;
+  background: linear-gradient(180deg, rgba(56, 96, 170, 0.98), rgba(39, 70, 124, 0.98));
+  box-shadow: inset 0 0 0 1px rgba(206, 223, 255, 0.2);
+}
+
 .card-block {
   padding: 10px;
   display: grid;
@@ -707,6 +745,7 @@ button {
 }
 
 .battle-shell {
+  position: relative;
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -724,6 +763,89 @@ button {
   padding: 5px;
   background: linear-gradient(180deg, rgba(11, 23, 46, 0.78), rgba(8, 17, 36, 0.82));
   overflow: hidden;
+}
+
+.tutorial-coach-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 36;
+  pointer-events: none;
+}
+
+.tutorial-coach-bubble {
+  position: absolute;
+  width: min(76%, 290px);
+  max-width: calc(100% - 16px);
+  max-height: min(38vh, 210px);
+  overflow: auto;
+  border: 1px solid #7faaf0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(27, 47, 85, 0.98), rgba(18, 34, 62, 0.99));
+  padding: 8px 10px;
+  display: grid;
+  gap: 5px;
+  box-shadow: 0 8px 24px rgba(4, 10, 22, 0.45);
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+
+.tutorial-coach-bubble.paused {
+  border-color: #92b5ff;
+}
+
+.tutorial-coach-bubble.is-top {
+  transform: translate(-50%, -100%);
+}
+
+.tutorial-coach-bubble.is-bottom {
+  transform: translate(-50%, 0);
+}
+
+.tutorial-coach-bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  margin-left: -8px;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+}
+
+.tutorial-coach-bubble.is-top::after {
+  top: 100%;
+  border-top: 8px solid rgba(25, 43, 77, 0.98);
+}
+
+.tutorial-coach-bubble.is-bottom::after {
+  bottom: 100%;
+  border-bottom: 8px solid rgba(25, 43, 77, 0.98);
+}
+
+.tutorial-coach-bubble h3 {
+  font-size: 0.68rem;
+}
+
+.tutorial-coach-bubble p {
+  font-size: 0.6rem;
+  line-height: 1.22;
+}
+
+.tutorial-coach__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 0.58rem;
+}
+
+.tutorial-coach__actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tutorial-emphasis {
+  border-color: #92b7ff !important;
+  box-shadow: 0 0 0 1px rgba(164, 194, 255, 0.36), 0 0 0 3px rgba(95, 145, 245, 0.2);
 }
 
 .battle-hud {
@@ -932,6 +1054,12 @@ button {
   border-color: #6ce2bf;
   box-shadow: inset 0 0 0 1px #6ce2bf;
   filter: saturate(1.06);
+}
+
+.slot.flip-target {
+  border-color: #ffb96c;
+  box-shadow: inset 0 0 0 1px #ffb96c;
+  filter: saturate(1.08);
 }
 
 .hit-flash {

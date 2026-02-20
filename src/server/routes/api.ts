@@ -1,10 +1,12 @@
 import { Hono, type Context } from "hono";
 import { context, reddit, redis } from "@devvit/web/server";
 import {
+  type LobbyMatchSummary,
   normalizeUsername,
   nowTs,
   opponentOf,
   stableHash,
+  type TutorialScenarioId,
   uniqueId,
   type InviteState,
   type MatchActionResult,
@@ -14,8 +16,16 @@ import {
   type StartMatchInput,
 } from "../../shared/game";
 import { DEFAULT_FACTION } from "../game/models";
-import { createInitialMatch, endTurn, playCard, applyMulligan, attack, repayNakedShort, sideForUser, tickTimeouts } from "../game/engine";
+import { createInitialMatch, endTurn, playCard, applyMulligan, attack, repositionJudgeSpecialist, repayNakedShort, sideForUser, tickTimeouts } from "../game/engine";
 import { runAiUntilHumanTurn } from "../game/ai";
+import {
+  acknowledgeTutorialStep,
+  advanceTutorialAfterAction,
+  repairTutorialIfNeeded,
+  setupTutorialMatch,
+  skipTutorial,
+  validateTutorialAction,
+} from "../game/tutorial";
 import {
   createRedisLike,
   getCurrentWeekId,
@@ -31,6 +41,7 @@ import {
   saveMatch,
   updateInvite,
   type RedisLike,
+  type LeaderboardBucket,
 } from "../game/storage";
 import { validateWeekOpen } from "../core/post";
 
@@ -53,6 +64,46 @@ function freshMatchSeed(base: string): number {
 
 function ok<T>(c: Context, data: T) {
   return c.json({ ok: true as const, data });
+}
+
+function aiLevelFromMatch(match: MatchState): 1 | 2 | 3 | undefined {
+  if (match.players.A.isBot) {
+    return match.players.A.botLevel;
+  }
+  if (match.players.B.isBot) {
+    return match.players.B.botLevel;
+  }
+  return undefined;
+}
+
+function leaderboardBucketForMatch(match: MatchState): LeaderboardBucket | null {
+  if (match.mode === "pvp") {
+    return "pvp";
+  }
+  if (match.mode !== "pve") {
+    return null;
+  }
+  const level = aiLevelFromMatch(match) ?? 1;
+  if (level === 1) return "pve_l1";
+  if (level === 2) return "pve_l2";
+  return "pve_l3";
+}
+
+function toLobbyMatchSummary(match: MatchState): LobbyMatchSummary {
+  return {
+    matchId: match.id,
+    mode: match.mode,
+    status: match.status,
+    updatedAt: match.updatedAt,
+    aiLevel: aiLevelFromMatch(match),
+    playerAUserId: match.players.A.userId,
+    playerAUsername: match.players.A.username,
+    playerAIsBot: match.players.A.isBot,
+    playerBUserId: match.players.B.userId,
+    playerBUsername: match.players.B.username,
+    playerBIsBot: match.players.B.isBot,
+    tutorialScenarioId: match.tutorial?.scenarioId,
+  };
 }
 
 function requireActor(): { ok: true; userId: string; username: string } | { ok: false; error: string; status: number } {
@@ -84,15 +135,19 @@ async function finalizeIfFinished(redisLike: RedisLike, wasFinished: boolean, ma
   if (match.status !== "finished" || !match.winnerSide) {
     return;
   }
+  if (match.mode === "tutorial") {
+    return;
+  }
 
   const winner = match.players[match.winnerSide];
   const loser = match.players[opponentOf(match.winnerSide)];
+  const bucket = leaderboardBucketForMatch(match);
 
   if (!winner.isBot) {
-    await recordUserOutcome(redisLike, match.weekId, { userId: winner.userId, username: winner.username }, true);
+    await recordUserOutcome(redisLike, match.weekId, { userId: winner.userId, username: winner.username }, true, bucket ?? "all");
   }
   if (!loser.isBot) {
-    await recordUserOutcome(redisLike, match.weekId, { userId: loser.userId, username: loser.username }, false);
+    await recordUserOutcome(redisLike, match.weekId, { userId: loser.userId, username: loser.username }, false, bucket ?? "all");
   }
 
   await incrementWeekMatchCount(redisLike, match.weekId);
@@ -104,6 +159,33 @@ async function loadMatch(matchId: string): Promise<{ ok: true; match: MatchState
     return { ok: false, status: 404, error: "Match not found." };
   }
   return { ok: true, match };
+}
+
+async function closeActiveTutorialMatchesForUser(userId: string, now: number): Promise<void> {
+  const userMatchIds = await listUserMatchIds(storageRedis, userId);
+  for (const matchId of userMatchIds) {
+    const one = await getMatch(storageRedis, matchId);
+    if (!one || one.mode !== "tutorial" || one.status === "finished") {
+      continue;
+    }
+    const side = sideForUser(one, userId);
+    if (!side) {
+      continue;
+    }
+    one.status = "finished";
+    one.winReason = "concede";
+    one.winnerSide = opponentOf(side);
+    one.turnDeadlineAt = now;
+    one.updatedAt = now;
+    if (one.tutorial) {
+      one.tutorial.paused = true;
+      one.tutorial.title = "Superseded tutorial";
+      one.tutorial.body = "A newer tutorial run was started.";
+      one.tutorial.actionHint = "Open the latest tutorial from lobby.";
+      one.tutorial.canSkip = false;
+    }
+    await saveMatch(storageRedis, one);
+  }
 }
 
 async function notifyInvite(invite: InviteState): Promise<void> {
@@ -133,23 +215,61 @@ api.post("/lobby", async (c) => {
   const invites = await listPendingInvites(storageRedis, actor.username);
   const userMatchIds = await listUserMatchIds(storageRedis, actor.userId);
 
-  const ongoing: string[] = [];
+  const quickPlayMatchSummaries: LobbyMatchSummary[] = [];
+  const pvpMatchSummaries: LobbyMatchSummary[] = [];
+  const tutorialMatchSummaries: LobbyMatchSummary[] = [];
   for (const matchId of userMatchIds) {
-    const one = await getMatch(storageRedis, matchId);
-    if (one && one.status !== "finished") {
-      ongoing.push(matchId);
+    const raw = await getMatch(storageRedis, matchId);
+    if (!raw) {
+      continue;
+    }
+
+    let one = raw;
+    if (one.mode === "tutorial") {
+      const repaired = repairTutorialIfNeeded(one);
+      if (repaired.repaired) {
+        one = repaired.match;
+        await saveMatch(storageRedis, one);
+      }
+    }
+
+    if (one.status !== "finished") {
+      const summary = toLobbyMatchSummary(one);
+      if (one.mode === "pvp") {
+        pvpMatchSummaries.push(summary);
+      } else if (one.mode === "tutorial") {
+        tutorialMatchSummaries.push(summary);
+      } else {
+        quickPlayMatchSummaries.push(summary);
+      }
     }
   }
 
-  const leaderboard = await getLeaderboardTop(storageRedis, weekState.weekId, 10);
+  quickPlayMatchSummaries.sort((a, b) => b.updatedAt - a.updatedAt);
+  pvpMatchSummaries.sort((a, b) => b.updatedAt - a.updatedAt);
+  tutorialMatchSummaries.sort((a, b) => b.updatedAt - a.updatedAt);
+
+  const [leaderboardPvp, leaderboardL1, leaderboardL2, leaderboardL3] = await Promise.all([
+    getLeaderboardTop(storageRedis, weekState.weekId, 10, "pvp"),
+    getLeaderboardTop(storageRedis, weekState.weekId, 10, "pve_l1"),
+    getLeaderboardTop(storageRedis, weekState.weekId, 10, "pve_l2"),
+    getLeaderboardTop(storageRedis, weekState.weekId, 10, "pve_l3"),
+  ]);
 
   return ok(c, {
     snapshot: {
       weekId: weekState.weekId,
       postId: weekState.postId,
       pendingInvites: invites,
-      ongoingMatchIds: ongoing,
-      leaderboard,
+      quickPlayMatchSummaries,
+      pvpMatchSummaries,
+      tutorialMatchSummaries,
+      leaderboardPvp,
+      leaderboardPveByLevel: {
+        l1: leaderboardL1,
+        l2: leaderboardL2,
+        l3: leaderboardL3,
+      },
     },
   });
 });
@@ -191,6 +311,52 @@ api.post("/match/ai", async (c) => {
   };
 
   const match = createInitialMatch(initInput, now);
+  await saveMatch(storageRedis, match);
+  await indexMatchForUser(storageRedis, actor.userId, match.id);
+
+  return ok(c, {
+    result: {
+      ok: true,
+      match,
+    } satisfies MatchActionResult,
+  });
+});
+
+api.post("/tutorial/start", async (c) => {
+  const actor = requireActor();
+  if (!actor.ok) {
+    return fail(c, actor.error, actor.status);
+  }
+
+  const weekState = await ensureActivePost(storageRedis);
+  if (!weekState.ok) {
+    return fail(c, weekState.error, weekState.status);
+  }
+
+  const body = (await c.req.json()) as { scenarioId?: TutorialScenarioId; faction?: FactionId };
+  const now = nowTs();
+  const scenarioId: TutorialScenarioId = body.scenarioId ?? "core_basics_v1";
+  await closeActiveTutorialMatchesForUser(actor.userId, now);
+  const initInput: StartMatchInput = {
+    weekId: weekState.weekId,
+    postId: weekState.postId,
+    mode: "tutorial",
+    tutorialScenarioId: scenarioId,
+    playerA: {
+      userId: actor.userId,
+      username: actor.username,
+      faction: body.faction ?? DEFAULT_FACTION,
+    },
+    playerB: {
+      userId: "tutorial_opponent",
+      username: "tutorial-opponent",
+      faction: "market_makers",
+      isBot: false,
+    },
+    seed: freshMatchSeed(`${weekState.weekId}:${actor.userId}:${scenarioId}:${now}`),
+  };
+
+  const match = setupTutorialMatch(createInitialMatch(initInput, now), scenarioId, now);
   await saveMatch(storageRedis, match);
   await indexMatchForUser(storageRedis, actor.userId, match.id);
 
@@ -327,11 +493,73 @@ api.post("/match/get", async (c) => {
 
   const wasFinished = loaded.match.status === "finished";
   let next = tickTimeouts(loaded.match);
+  const repaired = repairTutorialIfNeeded(next);
+  if (repaired.repaired) {
+    next = repaired.match;
+  }
   next = runAiUntilHumanTurn(next);
   await finalizeIfFinished(storageRedis, wasFinished, next);
   await saveMatch(storageRedis, next);
 
   return ok(c, { match: next });
+});
+
+api.post("/tutorial/acknowledge", async (c) => {
+  const actor = requireActor();
+  if (!actor.ok) {
+    return fail(c, actor.error, actor.status);
+  }
+
+  const body = (await c.req.json()) as { matchId: string };
+  const loaded = await loadMatch(body.matchId);
+  if (!loaded.ok) {
+    return fail(c, loaded.error, loaded.status);
+  }
+  const side = sideForUser(loaded.match, actor.userId);
+  if (!side) {
+    return fail(c, "You are not a player in this match.", 403);
+  }
+
+  let next = tickTimeouts(loaded.match);
+  const result = acknowledgeTutorialStep(next, side);
+  next = result.match;
+  await saveMatch(storageRedis, next);
+
+  return ok(c, {
+    result: {
+      ok: result.ok,
+      error: result.error,
+      match: next,
+    } satisfies MatchActionResult,
+  });
+});
+
+api.post("/tutorial/skip", async (c) => {
+  const actor = requireActor();
+  if (!actor.ok) {
+    return fail(c, actor.error, actor.status);
+  }
+
+  const body = (await c.req.json()) as { matchId: string };
+  const loaded = await loadMatch(body.matchId);
+  if (!loaded.ok) {
+    return fail(c, loaded.error, loaded.status);
+  }
+  const side = sideForUser(loaded.match, actor.userId);
+  if (!side) {
+    return fail(c, "You are not a player in this match.", 403);
+  }
+
+  const result = skipTutorial(loaded.match, side);
+  await saveMatch(storageRedis, result.match);
+
+  return ok(c, {
+    result: {
+      ok: result.ok,
+      error: result.error,
+      match: result.match,
+    } satisfies MatchActionResult,
+  });
 });
 
 api.post("/match/mulligan", async (c) => {
@@ -360,6 +588,15 @@ api.post("/match/mulligan", async (c) => {
   }
 
   let next = tickTimeouts(loaded.match);
+  if (next.mode === "tutorial") {
+    return ok(c, {
+      result: {
+        ok: false,
+        error: "Tutorial uses scripted flow and does not include mulligan.",
+        match: next,
+      } satisfies MatchActionResult,
+    });
+  }
   const result = applyMulligan(next, body.action);
   next = runAiUntilHumanTurn(result.match);
 
@@ -412,7 +649,20 @@ api.post("/match/play", async (c) => {
   }
 
   let next = tickTimeouts(loaded.match);
+  const tutorialValidation = validateTutorialAction(next, side, "play", body.action);
+  if (!tutorialValidation.ok) {
+    return ok(c, {
+      result: {
+        ok: false,
+        error: tutorialValidation.error,
+        match: next,
+      } satisfies MatchActionResult,
+    });
+  }
   const result = playCard(next, body.action);
+  if (result.ok) {
+    advanceTutorialAfterAction(result.match, "play");
+  }
   next = runAiUntilHumanTurn(result.match);
 
   await finalizeIfFinished(storageRedis, wasFinished, next);
@@ -461,7 +711,73 @@ api.post("/match/attack", async (c) => {
   }
 
   let next = tickTimeouts(loaded.match);
+  const tutorialValidation = validateTutorialAction(next, side, "attack", body.action);
+  if (!tutorialValidation.ok) {
+    return ok(c, {
+      result: {
+        ok: false,
+        error: tutorialValidation.error,
+        match: next,
+      } satisfies MatchActionResult,
+    });
+  }
   const result = attack(next, body.action);
+  if (result.ok) {
+    advanceTutorialAfterAction(result.match, "attack");
+  }
+  next = runAiUntilHumanTurn(result.match);
+
+  await finalizeIfFinished(storageRedis, wasFinished, next);
+  await saveMatch(storageRedis, next);
+
+  return ok(c, {
+    result: {
+      ok: result.ok,
+      error: result.error,
+      match: next,
+    } satisfies MatchActionResult,
+  });
+});
+
+api.post("/match/reposition-judge", async (c) => {
+  const actor = requireActor();
+  if (!actor.ok) {
+    return fail(c, actor.error, actor.status);
+  }
+
+  const body = (await c.req.json()) as {
+    matchId: string;
+    action: {
+      side: PlayerSide;
+      unitId: string;
+    };
+  };
+
+  const loaded = await loadMatch(body.matchId);
+  if (!loaded.ok) {
+    return fail(c, loaded.error, loaded.status);
+  }
+
+  const wasFinished = loaded.match.status === "finished";
+  const side = sideForUser(loaded.match, actor.userId);
+  if (!side) {
+    return fail(c, "You are not a player in this match.", 403);
+  }
+  if (side !== body.action.side) {
+    return fail(c, "Action side mismatch.", 403);
+  }
+
+  let next = tickTimeouts(loaded.match);
+  if (next.mode === "tutorial") {
+    return ok(c, {
+      result: {
+        ok: false,
+        error: "Tutorial step does not use Judge reposition action.",
+        match: next,
+      } satisfies MatchActionResult,
+    });
+  }
+  const result = repositionJudgeSpecialist(next, body.action);
   next = runAiUntilHumanTurn(result.match);
 
   await finalizeIfFinished(storageRedis, wasFinished, next);
@@ -502,8 +818,29 @@ api.post("/match/end-turn", async (c) => {
   }
 
   let next = tickTimeouts(loaded.match);
+  const tutorialValidation = validateTutorialAction(next, side, "end-turn", body.action);
+  if (!tutorialValidation.ok) {
+    return ok(c, {
+      result: {
+        ok: false,
+        error: tutorialValidation.error,
+        match: next,
+      } satisfies MatchActionResult,
+    });
+  }
   const result = endTurn(next, body.action.side);
-  next = runAiUntilHumanTurn(result.match);
+  if (result.ok) {
+    let progressed = result.match;
+    if (progressed.mode === "tutorial" && progressed.status === "active" && progressed.activeSide === "B") {
+      const autoPass = endTurn(progressed, "B");
+      if (autoPass.ok) {
+        progressed = autoPass.match;
+      }
+    }
+    advanceTutorialAfterAction(progressed, "end-turn");
+    next = progressed;
+  }
+  next = runAiUntilHumanTurn(next);
 
   await finalizeIfFinished(storageRedis, wasFinished, next);
   await saveMatch(storageRedis, next);
@@ -543,6 +880,15 @@ api.post("/match/repay-naked-short", async (c) => {
   }
 
   let next = tickTimeouts(loaded.match);
+  if (next.mode === "tutorial") {
+    return ok(c, {
+      result: {
+        ok: false,
+        error: "Tutorial step does not use Naked Short repayment.",
+        match: next,
+      } satisfies MatchActionResult,
+    });
+  }
   const result = repayNakedShort(next, body.action.side);
   next = runAiUntilHumanTurn(result.match);
 

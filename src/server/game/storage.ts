@@ -2,6 +2,8 @@ import type { RedisClient } from "@devvit/web/server";
 import { PREFIX, calcRatio, leaderboardScore } from "../../shared/game";
 import type { InviteState, MatchState, WeeklyUserStats } from "../../shared/game";
 
+export type LeaderboardBucket = "all" | "pvp" | "pve_l1" | "pve_l2" | "pve_l3";
+
 type RuntimeRedis = Pick<
   RedisClient,
   "get" | "set" | "del" | "incrBy" | "hSet" | "hKeys" | "hDel" | "zAdd" | "zRange"
@@ -57,20 +59,29 @@ function keyWeekPost(weekId: string): string {
   return `${PREFIX}:week:${weekId}:post`;
 }
 
-function keyWeekLeaderboard(weekId: string): string {
-  return `${PREFIX}:week:${weekId}:leaderboard`;
+function keyWeekLeaderboard(weekId: string, bucket: LeaderboardBucket = "all"): string {
+  if (bucket === "all") {
+    return `${PREFIX}:week:${weekId}:leaderboard`;
+  }
+  return `${PREFIX}:week:${weekId}:leaderboard:${bucket}`;
 }
 
-function keyWeekUserStats(weekId: string, userId: string): string {
-  return `${PREFIX}:week:${weekId}:user:${userId}:stats`;
+function keyWeekUserStats(weekId: string, userId: string, bucket: LeaderboardBucket = "all"): string {
+  if (bucket === "all") {
+    return `${PREFIX}:week:${weekId}:user:${userId}:stats`;
+  }
+  return `${PREFIX}:week:${weekId}:user:${userId}:stats:${bucket}`;
 }
 
 function keyWeekUserName(weekId: string, userId: string): string {
   return `${PREFIX}:week:${weekId}:user:${userId}:name`;
 }
 
-function keyWeekUserIndex(weekId: string): string {
-  return `${PREFIX}:week:${weekId}:users`;
+function keyWeekUserIndex(weekId: string, bucket: LeaderboardBucket = "all"): string {
+  if (bucket === "all") {
+    return `${PREFIX}:week:${weekId}:users`;
+  }
+  return `${PREFIX}:week:${weekId}:users:${bucket}`;
 }
 
 function keyWeekMatchCounter(weekId: string): string {
@@ -172,8 +183,13 @@ export async function getWeekMatchCount(redis: RedisLike, weekId: string): Promi
   return raw ? Number(raw) : 0;
 }
 
-async function readUserStats(redis: RedisLike, weekId: string, userId: string): Promise<WeeklyUserStats> {
-  const statsRaw = await redis.get(keyWeekUserStats(weekId, userId));
+async function readUserStats(
+  redis: RedisLike,
+  weekId: string,
+  userId: string,
+  bucket: LeaderboardBucket = "all",
+): Promise<WeeklyUserStats> {
+  const statsRaw = await redis.get(keyWeekUserStats(weekId, userId, bucket));
   const username = (await redis.get(keyWeekUserName(weekId, userId))) ?? userId;
   if (!statsRaw) {
     return {
@@ -192,11 +208,16 @@ async function readUserStats(redis: RedisLike, weekId: string, userId: string): 
   };
 }
 
-async function writeUserStats(redis: RedisLike, weekId: string, stats: WeeklyUserStats): Promise<void> {
-  await redis.set(keyWeekUserStats(weekId, stats.userId), JSON.stringify(stats));
+async function writeUserStats(
+  redis: RedisLike,
+  weekId: string,
+  stats: WeeklyUserStats,
+  bucket: LeaderboardBucket = "all",
+): Promise<void> {
+  await redis.set(keyWeekUserStats(weekId, stats.userId, bucket), JSON.stringify(stats));
   await redis.set(keyWeekUserName(weekId, stats.userId), stats.username);
-  await redis.sAdd(keyWeekUserIndex(weekId), stats.userId);
-  await redis.zAdd(keyWeekLeaderboard(weekId), leaderboardScore(stats), stats.userId);
+  await redis.sAdd(keyWeekUserIndex(weekId, bucket), stats.userId);
+  await redis.zAdd(keyWeekLeaderboard(weekId, bucket), leaderboardScore(stats), stats.userId);
 }
 
 export async function recordMatchResult(
@@ -214,8 +235,23 @@ export async function recordUserOutcome(
   weekId: string,
   user: { userId: string; username: string },
   didWin: boolean,
+  bucket: LeaderboardBucket = "all",
 ): Promise<void> {
-  const stats = await readUserStats(redis, weekId, user.userId);
+  const allStats = await readUserStats(redis, weekId, user.userId, "all");
+  allStats.username = user.username;
+  allStats.matches += 1;
+  if (didWin) {
+    allStats.wins += 1;
+  } else {
+    allStats.losses += 1;
+  }
+  await writeUserStats(redis, weekId, allStats, "all");
+
+  if (bucket === "all") {
+    return;
+  }
+
+  const stats = await readUserStats(redis, weekId, user.userId, bucket);
   stats.username = user.username;
   stats.matches += 1;
   if (didWin) {
@@ -223,18 +259,19 @@ export async function recordUserOutcome(
   } else {
     stats.losses += 1;
   }
-  await writeUserStats(redis, weekId, stats);
+  await writeUserStats(redis, weekId, stats, bucket);
 }
 
 export async function getLeaderboardTop(
   redis: RedisLike,
   weekId: string,
   limit = 10,
+  bucket: LeaderboardBucket = "all",
 ): Promise<WeeklyUserStats[]> {
-  const userIds = await redis.zRange(keyWeekLeaderboard(weekId), 0, limit - 1, { rev: true });
+  const userIds = await redis.zRange(keyWeekLeaderboard(weekId, bucket), 0, limit - 1, { rev: true });
   const stats: WeeklyUserStats[] = [];
   for (const userId of userIds) {
-    const one = await readUserStats(redis, weekId, userId);
+    const one = await readUserStats(redis, weekId, userId, bucket);
     stats.push(one);
   }
 

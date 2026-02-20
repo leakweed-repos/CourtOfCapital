@@ -9,9 +9,10 @@ export const TURN_SECONDS = 35;
 
 export const PREFIX = "coc:v1";
 
-export type MatchMode = "pve" | "pvp";
+export type MatchMode = "pve" | "pvp" | "tutorial";
 export type MatchStatus = "mulligan" | "active" | "finished";
 export type MatchWinReason = "leader" | "verdict" | "concede";
+export type TutorialScenarioId = "core_basics_v1" | "buffs_debuffs_v1" | "judge_dependencies_v1";
 
 export type PlayerSide = "A" | "B";
 export type Lane = "front" | "back";
@@ -25,6 +26,7 @@ export type CardTrait =
   | "ranged"
   | "reach"
   | "rush"
+  | "flip"
   | "dirty"
   | "prosecutor"
   | "negotiator"
@@ -62,6 +64,7 @@ export interface UnitState {
   exposedUntilTurn?: number;
   tempAttackPenalty?: number;
   tempAttackPenaltyUntilTurn?: number;
+  judgeRepositionUsed?: boolean;
 }
 
 export interface EventUnitState {
@@ -115,6 +118,24 @@ export interface MatchLogEntry {
   text: string;
 }
 
+export interface TutorialState {
+  scenarioId: TutorialScenarioId;
+  stepIndex: number;
+  totalSteps: number;
+  paused: boolean;
+  canSkip: boolean;
+  title: string;
+  body: string;
+  actionHint: string;
+  coachAnchorKind?: "none" | "hand-card" | "slot" | "button";
+  coachCardId?: string;
+  coachSide?: "ally" | "enemy";
+  coachLane?: Lane;
+  coachCol?: number;
+  coachButtonId?: "end-turn" | "cast-card";
+  pausedRemainingMs?: number;
+}
+
 export interface MatchState {
   id: string;
   weekId: string;
@@ -141,6 +162,7 @@ export interface MatchState {
     A: PlayerState;
     B: PlayerState;
   };
+  tutorial?: TutorialState;
   log: MatchLogEntry[];
 }
 
@@ -166,18 +188,41 @@ export interface WeeklyUserStats {
   matches: number;
 }
 
+export interface LobbyMatchSummary {
+  matchId: string;
+  mode: MatchMode;
+  status: MatchStatus;
+  updatedAt: number;
+  aiLevel?: 1 | 2 | 3;
+  playerAUserId: string;
+  playerAUsername: string;
+  playerAIsBot: boolean;
+  playerBUserId: string;
+  playerBUsername: string;
+  playerBIsBot: boolean;
+  tutorialScenarioId?: TutorialScenarioId;
+}
+
 export interface LobbySnapshot {
   weekId: string;
   postId: string;
   pendingInvites: InviteState[];
-  ongoingMatchIds: string[];
-  leaderboard: WeeklyUserStats[];
+  quickPlayMatchSummaries: LobbyMatchSummary[];
+  pvpMatchSummaries: LobbyMatchSummary[];
+  tutorialMatchSummaries: LobbyMatchSummary[];
+  leaderboardPvp: WeeklyUserStats[];
+  leaderboardPveByLevel: {
+    l1: WeeklyUserStats[];
+    l2: WeeklyUserStats[];
+    l3: WeeklyUserStats[];
+  };
 }
 
 export interface StartMatchInput {
   weekId: string;
   postId: string;
   mode: MatchMode;
+  tutorialScenarioId?: TutorialScenarioId;
   playerA: {
     userId: string;
     username: string;
@@ -231,6 +276,11 @@ export interface MulliganInput {
 
 export interface EndTurnInput {
   side: PlayerSide;
+}
+
+export interface RepositionJudgeInput {
+  side: PlayerSide;
+  unitId: string;
 }
 
 export function opponentOf(side: PlayerSide): PlayerSide {

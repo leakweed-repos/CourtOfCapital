@@ -6,6 +6,8 @@ import type {
   MatchState,
   MulliganInput,
   PlayCardInput,
+  RepositionJudgeInput,
+  TutorialScenarioId,
   WeeklyUserStats,
   FactionId,
 } from "./game";
@@ -33,6 +35,14 @@ export interface StartAiMatchRequest {
   faction?: FactionId;
 }
 
+export interface StartTutorialMatchRequest {
+  weekId?: string;
+  postId?: string;
+  userId?: string;
+  username?: string;
+  scenarioId?: TutorialScenarioId;
+}
+
 export interface StartPvpInviteRequest {
   weekId?: string;
   postId?: string;
@@ -50,6 +60,10 @@ export interface AcceptInviteRequest {
 }
 
 export interface MatchQuery {
+  matchId: string;
+}
+
+export interface TutorialStepRequest {
   matchId: string;
 }
 
@@ -91,12 +105,16 @@ export interface MatchDataResponse {
 export const API_ROUTES = {
   lobby: "/api/lobby",
   matchAi: "/api/match/ai",
+  tutorialStart: "/api/tutorial/start",
+  tutorialAcknowledge: "/api/tutorial/acknowledge",
+  tutorialSkip: "/api/tutorial/skip",
   inviteCreate: "/api/match/invite",
   inviteAccept: "/api/invite/accept",
   matchGet: "/api/match/get",
   matchMulligan: "/api/match/mulligan",
   matchPlay: "/api/match/play",
   matchAttack: "/api/match/attack",
+  matchRepositionJudge: "/api/match/reposition-judge",
   matchEndTurn: "/api/match/end-turn",
   matchRepayNakedShort: "/api/match/repay-naked-short",
 } as const;
@@ -145,5 +163,6 @@ export async function postJson<TRequest, TResponse = any>(
 export type MatchActionBody =
   | MatchActionEnvelope<MulliganInput>
   | MatchActionEnvelope<PlayCardInput>
-  | MatchActionEnvelope<AttackInput>;
+  | MatchActionEnvelope<AttackInput>
+  | MatchActionEnvelope<RepositionJudgeInput>;
 

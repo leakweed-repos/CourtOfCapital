@@ -20,6 +20,7 @@ import type {
   MulliganInput,
   PlayCardInput,
   PlayerSide,
+  RepositionJudgeInput,
   StartMatchInput,
   UnitState,
 } from "../../shared/game";
@@ -44,7 +45,8 @@ import {
 } from "../../shared/judge-specialists";
 import { getResistanceChance, type ResistanceKind } from "../../shared/resistance";
 import { getUnitSignatureProfile } from "../../shared/unit-signatures";
-import { isJudgeCorruptSpecialistCard, isJudgePositiveSpecialistCard } from "../../shared/placement";
+import { isJudgeCorruptSpecialistCard, isJudgePositiveSpecialistCard, isJudgeSpecialistCard } from "../../shared/placement";
+import { tutorialTickPause } from "./tutorial";
 
 const MAX_LOG = 60;
 const EXPLICIT_UNIT_SKILL_IDS = new Set<string>([
@@ -107,6 +109,17 @@ function drawOne(match: MatchState, side: PlayerSide): string | null {
   }
   player.hand.push(cardId);
   return cardId;
+}
+
+function returnCardToHandOrBurn(match: MatchState, side: PlayerSide, cardId: string, reason: string): void {
+  const player = match.players[side];
+  if (player.hand.length >= MAX_HAND_SIZE) {
+    player.discard.push(cardId);
+    pushLog(match, `${side} burned ${getCard(cardId).name} (${reason}, hand limit ${MAX_HAND_SIZE}).`);
+    return;
+  }
+  player.hand.push(cardId);
+  pushLog(match, `${side} recovered ${getCard(cardId).name} to hand (${reason}).`);
 }
 
 function isUnitCard(cardId: string): boolean {
@@ -551,6 +564,11 @@ function applyUnitOnSummonSkill(match: MatchState, side: PlayerSide, unit: UnitS
     pushLog(match, `${unit.name} deployed with Rush and can attack immediately.`);
   }
 
+  if (!hasActiveJudgeSkillContext(unit)) {
+    pushLog(match, `${unit.name} is outside its Judge slot and acts as a stat-only unit.`);
+    return;
+  }
+
   if (unit.cardId === "guild_bailiff") {
     addUnitShield(unit, 1);
     pushLog(match, "Guild Bailiff entered with +1 shield.");
@@ -868,6 +886,10 @@ function applyUnitTurnStartSkills(match: MatchState, side: PlayerSide): void {
     const unit = match.units[id];
     if (!unit) continue;
 
+    if (!hasActiveJudgeSkillContext(unit)) {
+      continue;
+    }
+
     if (unit.cardId === "civic_auditor" && civicAuditorProcs < 2) {
       const tax = Math.min(25, enemyPlayer.shares);
       enemyPlayer.shares -= tax;
@@ -1161,6 +1183,7 @@ function applyFactionCombatHooks(
   const enemy = opponentOf(side);
   const attackerFaction = unitFaction(attacker);
   const targetFaction = unitFaction(target);
+  const activeJudgeSkillContext = hasActiveJudgeSkillContext(attacker);
 
   if (attackerFaction === "market_makers" && attacker.lane === "back" && (attacker.traits.includes("ranged") || attacker.traits.includes("back_only"))) {
     match.players[side].shares += 8;
@@ -1191,49 +1214,49 @@ function applyFactionCombatHooks(
     applyRetailBacklash(match, side, enemy);
   }
 
-  if (attacker.cardId === "halt_marshall" && !targetDied) {
+  if (activeJudgeSkillContext && attacker.cardId === "halt_marshall" && !targetDied) {
     stunUnitUntil(target, match.turn + 2, match, "Halt Marshall hit");
     pushLog(match, `Halt Marshall locked ${target.name}: stunned.`);
   }
 
-  if (attacker.cardId === "market_arbiter") {
+  if (activeJudgeSkillContext && attacker.cardId === "market_arbiter") {
     const payout = Math.min(30, attacker.attack * 10);
     match.players[side].shares += payout;
     pushLog(match, `Market Arbiter arbitration fee: +${payout} shares.`);
   }
 
-  if (attacker.cardId === "spread_sniper" && !targetDied) {
+  if (activeJudgeSkillContext && attacker.cardId === "spread_sniper" && !targetDied) {
     exposeUnitUntil(target, match.turn + 2, match, "Spread Sniper hit");
     pushLog(match, `Spread Sniper exposed ${target.name}.`);
   }
 
-  if (attacker.cardId === "clearing_knight" && targetDied && !attackerDied) {
+  if (activeJudgeSkillContext && attacker.cardId === "clearing_knight" && targetDied && !attackerDied) {
     attacker.attack += 1;
     pushLog(match, "Clearing Knight chain-clear: +1 attack.");
   }
 
-  if (attacker.cardId === "meme_berserker" && !attackerDied) {
+  if (activeJudgeSkillContext && attacker.cardId === "meme_berserker" && !attackerDied) {
     attacker.attack += 1;
     pushLog(match, "Meme Berserker snowball: +1 attack.");
   }
 
-  if (attacker.cardId === "whisper_lobbyist" && !targetDied) {
+  if (activeJudgeSkillContext && attacker.cardId === "whisper_lobbyist" && !targetDied) {
     exposeUnitUntil(target, match.turn + 2, match, "Whisper Lobbyist hit");
     pushLog(match, `Whisper Lobbyist marked ${target.name} as exposed.`);
   }
 
-  if (attacker.cardId === "ftd_collector" && targetDied) {
+  if (activeJudgeSkillContext && attacker.cardId === "ftd_collector" && targetDied) {
     match.players[side].shares += 70;
     pushLog(match, "FTD Collector fee extraction: +70 shares.");
   }
 
-  if (attacker.cardId === "narrative_assassin" && !targetDied) {
+  if (activeJudgeSkillContext && attacker.cardId === "narrative_assassin" && !targetDied) {
     target.attack = Math.max(1, target.attack - 1);
     pushLog(match, `Narrative Assassin pressure: ${target.name} lost 1 attack.`);
     return;
   }
 
-  if (!hasExplicitUnitSkill(attacker.cardId)) {
+  if (activeJudgeSkillContext && !hasExplicitUnitSkill(attacker.cardId)) {
     applyFallbackUnitCombatSkill(match, side, attacker, target, targetDied, attackerDied);
   }
 }
@@ -1275,6 +1298,69 @@ function isBlueJudgeUnit(unit: UnitState): boolean {
 
 function isGreenJudgeUnit(unit: UnitState): boolean {
   return isJudgeGoodSlot(unit.lane, unit.col);
+}
+
+function hasActiveJudgeSkillContext(unit: UnitState): boolean {
+  if (!isJudgeSpecialistCard(unit.cardId)) {
+    return true;
+  }
+  if (isJudgeGoodSlot(unit.lane, unit.col) && isJudgePositiveSpecialistCard(unit.cardId)) {
+    return true;
+  }
+  if (isJudgeBadSlot(unit.lane, unit.col) && isJudgeCorruptSpecialistCard(unit.cardId)) {
+    return true;
+  }
+  return false;
+}
+
+function preferredJudgeLaneForUnit(unit: UnitState): "front" | "back" | undefined {
+  const canGreen = isJudgePositiveSpecialistCard(unit.cardId);
+  const canBlue = isJudgeCorruptSpecialistCard(unit.cardId);
+  if (canGreen && canBlue) {
+    return unit.lane === "front" ? "front" : "back";
+  }
+  if (canGreen) {
+    return "front";
+  }
+  if (canBlue) {
+    return "back";
+  }
+  return undefined;
+}
+
+function findJudgeRepositionLane(match: MatchState, side: PlayerSide, unit: UnitState): "front" | "back" | undefined {
+  const canGreen = isJudgePositiveSpecialistCard(unit.cardId);
+  const canBlue = isJudgeCorruptSpecialistCard(unit.cardId);
+  if (!canGreen && !canBlue) {
+    return undefined;
+  }
+
+  const preferredLane = preferredJudgeLaneForUnit(unit);
+  const candidates: Array<"front" | "back"> = [];
+
+  if (preferredLane === "front" && canGreen) {
+    candidates.push("front");
+  }
+  if (preferredLane === "back" && canBlue) {
+    candidates.push("back");
+  }
+  if (canGreen && !candidates.includes("front")) {
+    candidates.push("front");
+  }
+  if (canBlue && !candidates.includes("back")) {
+    candidates.push("back");
+  }
+
+  for (const lane of candidates) {
+    if (lane === unit.lane && unit.col === JUDGE_COL) {
+      continue;
+    }
+    if (match.players[side].board[lane][JUDGE_COL] === null) {
+      return lane;
+    }
+  }
+
+  return undefined;
 }
 
 function judgeSlotUnit(match: MatchState, side: PlayerSide, lane: "front" | "back"): UnitState | undefined {
@@ -1397,13 +1483,106 @@ function applyJudgeBlueRider(match: MatchState, targetSide: PlayerSide, rider: J
   return "enemy favor -1, probation +1";
 }
 
+function applyJudgeOwnerCombo(
+  match: MatchState,
+  side: PlayerSide,
+  greenUnit: UnitState,
+  blueUnit: UnitState,
+): void {
+  const enemy = opponentOf(side);
+  const player = match.players[side];
+  const enemyPlayer = match.players[enemy];
+  const comboRoll = stableHash(`judge:combo:${greenUnit.cardId}:${blueUnit.cardId}`) % 5;
+
+  if (comboRoll === 0) {
+    const siphon = Math.min(55, enemyPlayer.shares);
+    const keep = Math.floor(siphon * 0.6);
+    enemyPlayer.shares -= siphon;
+    player.shares += keep;
+    enemyPlayer.probation += 1;
+    pushLog(
+      match,
+      `Judge duo combo [fee loop]: ${greenUnit.name}+${blueUnit.name} drained ${siphon} shares (kept ${keep}) and enemy probation +1.`,
+    );
+    return;
+  }
+
+  if (comboRoll === 1) {
+    addUnitShield(greenUnit, 1);
+    addUnitShield(blueUnit, 1);
+    const healTargetId = randomUnitId(match, listSideUnitIds(match, side), "judge:combo:heal");
+    let healText = "no ally healed";
+    if (healTargetId) {
+      const healTarget = match.units[healTargetId];
+      if (healTarget) {
+        const healed = healUnit(healTarget, 1);
+        healText = `${healTarget.name} healed by ${healed}`;
+      }
+    }
+    pushLog(
+      match,
+      `Judge duo combo [protective order]: both Judge specialists gained shield; ${healText}.`,
+    );
+    return;
+  }
+
+  if (comboRoll === 2) {
+    const targetId = pickHighestAttackUnitId(match, listSideUnitIds(match, enemy));
+    if (!targetId) {
+      enemyPlayer.favor = clamp(enemyPlayer.favor - 1, -20, 20);
+      pushLog(match, `Judge duo combo [injunction lock]: no unit target, enemy favor -1.`);
+      return;
+    }
+    const target = match.units[targetId];
+    if (!target) {
+      enemyPlayer.favor = clamp(enemyPlayer.favor - 1, -20, 20);
+      pushLog(match, `Judge duo combo [injunction lock]: no unit target, enemy favor -1.`);
+      return;
+    }
+    stunUnitUntil(target, match.turn + 2, match, "Judge combo injunction");
+    pushLog(match, `Judge duo combo [injunction lock]: ${target.name} stunned.`);
+    return;
+  }
+
+  if (comboRoll === 3) {
+    const targetId = randomUnitId(match, listSideUnitIds(match, enemy), "judge:combo:expose");
+    if (!targetId) {
+      enemyPlayer.probation += 1;
+      pushLog(match, "Judge duo combo [narrative hit]: no unit target, enemy probation +1.");
+      return;
+    }
+    const target = match.units[targetId];
+    if (!target) {
+      enemyPlayer.probation += 1;
+      pushLog(match, "Judge duo combo [narrative hit]: no unit target, enemy probation +1.");
+      return;
+    }
+    exposeUnitUntil(target, match.turn + 1, match, "Judge combo narrative");
+    const reduced = applyTemporaryAttackPenalty(match, target, 1, match.turn + 2, "Judge combo narrative");
+    pushLog(match, `Judge duo combo [narrative hit]: ${target.name} exposed and attack reduced by ${reduced}.`);
+    return;
+  }
+
+  player.favor = clamp(player.favor + 1, -20, 20);
+  player.probation = Math.max(0, player.probation - 1);
+  player.shares += 35;
+  pushLog(match, "Judge duo combo [settlement engine]: +35 shares, +1 favor, -1 probation.");
+}
+
 function applyJudgeLaneInfluence(match: MatchState, activeSide: PlayerSide): void {
   const enemySide = opponentOf(activeSide);
   const activePlayer = match.players[activeSide];
   const enemyPlayer = match.players[enemySide];
 
   const ownGreen = judgeSlotUnit(match, activeSide, "front");
+  const ownBlue = judgeSlotUnit(match, activeSide, "back");
   const greenProfile = ownGreen ? getJudgeSpecialistProfile(ownGreen.cardId).green : undefined;
+  const blueProfileOwn = ownBlue ? getJudgeSpecialistProfile(ownBlue.cardId).blue : undefined;
+
+  if (ownGreen && greenProfile && ownBlue && blueProfileOwn) {
+    applyJudgeOwnerCombo(match, activeSide, ownGreen, ownBlue);
+  }
+
   if (ownGreen && greenProfile) {
     activePlayer.favor = clamp(activePlayer.favor + 1, -20, 20);
     match.judgeMood = clamp(match.judgeMood - 1, -5, 5);
@@ -2263,21 +2442,23 @@ function startTurn(match: MatchState): void {
   applyJudgeLaneInfluence(match, active);
   applyFactionTurnStart(match, active);
   drawOne(match, active);
-  applyRandomEvent(match);
-  if ((match.status as string) === "finished") {
-    return;
-  }
+  if (match.mode !== "tutorial") {
+    applyRandomEvent(match);
+    if ((match.status as string) === "finished") {
+      return;
+    }
 
-  maybeGrantVerdict(match, active);
-  if ((match.status as string) === "finished") {
-    return;
-  }
+    maybeGrantVerdict(match, active);
+    if ((match.status as string) === "finished") {
+      return;
+    }
 
-  const driftRoll = nextRoll(match, "judge:mood:drift");
-  if (driftRoll < 0.34) {
-    match.judgeMood = clamp(match.judgeMood - 1, -5, 5);
-  } else if (driftRoll > 0.66) {
-    match.judgeMood = clamp(match.judgeMood + 1, -5, 5);
+    const driftRoll = nextRoll(match, "judge:mood:drift");
+    if (driftRoll < 0.34) {
+      match.judgeMood = clamp(match.judgeMood - 1, -5, 5);
+    } else if (driftRoll > 0.66) {
+      match.judgeMood = clamp(match.judgeMood + 1, -5, 5);
+    }
   }
 
   match.turnDeadlineAt = nowTs() + TURN_SECONDS * 1000;
@@ -2395,6 +2576,10 @@ function startActiveFromMulligan(match: MatchState): void {
 }
 
 export function tickTimeouts(match: MatchState, now = nowTs()): MatchState {
+  if (match.mode === "tutorial" && match.tutorial?.paused) {
+    return tutorialTickPause(match, now);
+  }
+
   if (match.status === "mulligan" && now >= match.mulliganDeadlineAt) {
     for (const side of ["A", "B"] as const) {
       const player = match.players[side];
@@ -2481,10 +2666,8 @@ export function playCard(match: MatchState, input: PlayCardInput): MatchActionRe
     return { ok: false, error: targetValidation.error, match };
   }
 
-  const spendCost = card.type === "unit" || card.id === "naked_shorting" ? card.costShares : 0;
-  if (player.shares < spendCost) {
-    return { ok: false, error: "Not enough shares.", match };
-  }
+  let flipSourceUnitId: string | undefined;
+  let usesFlip = false;
 
   if (card.type === "unit") {
     if (!inBoundsCol(input.col)) {
@@ -2499,9 +2682,25 @@ export function playCard(match: MatchState, input: PlayCardInput): MatchActionRe
     if (isJudgeBadSlot(input.lane, input.col) && !isCorruptJudgeCard(card.id)) {
       return { ok: false, error: "Judge blue slot accepts only dirty units.", match };
     }
-    if (player.board[input.lane][input.col]) {
-      return { ok: false, error: "Slot is occupied.", match };
+    const occupiedUnitId = player.board[input.lane][input.col];
+    if (occupiedUnitId) {
+      if (!card.traits.includes("flip")) {
+        return { ok: false, error: "Slot is occupied.", match };
+      }
+      const occupiedUnit = match.units[occupiedUnitId];
+      if (!occupiedUnit || occupiedUnit.owner !== input.side) {
+        return { ok: false, error: "Flip can only replace your own unit.", match };
+      }
+      usesFlip = true;
+      flipSourceUnitId = occupiedUnitId;
     }
+  }
+
+  const baseCost = card.type === "unit" || card.id === "naked_shorting" ? card.costShares : 0;
+  const flipSurcharge = usesFlip ? Math.max(1, Math.ceil(card.costShares * 0.25)) : 0;
+  const spendCost = baseCost + flipSurcharge;
+  if (player.shares < spendCost) {
+    return { ok: false, error: "Not enough shares.", match };
   }
 
   player.hand.splice(input.handIndex, 1);
@@ -2511,7 +2710,19 @@ export function playCard(match: MatchState, input: PlayCardInput): MatchActionRe
   let playedUnitId: string | undefined;
 
   if (card.type === "unit") {
+    if (usesFlip && flipSourceUnitId) {
+      const flippedOut = match.units[flipSourceUnitId];
+      if (flippedOut) {
+        removeUnit(match, flipSourceUnitId);
+        returnCardToHandOrBurn(match, input.side, flippedOut.cardId, "Flip swap");
+      }
+      pushLog(match, `${input.side} paid +${flipSurcharge} shares to use Flip swap.`);
+    }
+
     const unit = slotUnit(match, input.side, input.lane, input.col, card.id);
+    if (usesFlip) {
+      unit.traits = unit.traits.filter((trait) => trait !== "flip");
+    }
     playedUnitId = unit.id;
     pushLog(match, `${input.side} played ${card.name} to ${input.lane} ${input.col + 1}.`);
     applyFactionOnSummon(match, input.side, unit);
@@ -2520,7 +2731,9 @@ export function playCard(match: MatchState, input: PlayCardInput): MatchActionRe
   }
 
   if ((card.dirtyPower ?? 0) > 0 || card.traits.includes("dirty")) {
-    applyJudgePenalty(match, input.side, card.dirtyPower ?? 1, playedUnitId);
+    if (match.mode !== "tutorial") {
+      applyJudgePenalty(match, input.side, card.dirtyPower ?? 1, playedUnitId);
+    }
   } else {
     player.favor = clamp(player.favor + 1, -20, 20);
     player.probation = Math.max(0, player.probation - 1);
@@ -2674,6 +2887,51 @@ export function attack(match: MatchState, input: AttackInput): MatchActionResult
   }
 
   attacker.cannotAttackUntilTurn = match.turn + 1;
+  match.updatedAt = nowTs();
+  return { ok: true, match };
+}
+
+export function repositionJudgeSpecialist(match: MatchState, input: RepositionJudgeInput): MatchActionResult {
+  if (match.status !== "active") {
+    return { ok: false, error: "Match is not active.", match };
+  }
+  if (match.activeSide !== input.side) {
+    return { ok: false, error: "Not your turn.", match };
+  }
+
+  const unit = match.units[input.unitId];
+  if (!unit || unit.owner !== input.side) {
+    return { ok: false, error: "Unit not available.", match };
+  }
+  if (!isJudgeSpecialistCard(unit.cardId)) {
+    return { ok: false, error: "Only Judge specialist units can reposition.", match };
+  }
+  if (unit.judgeRepositionUsed) {
+    return { ok: false, error: "This specialist already used its Judge reposition.", match };
+  }
+  if ((unit.stunnedUntilTurn ?? 0) > match.turn) {
+    return { ok: false, error: "Stunned unit cannot reposition.", match };
+  }
+  if (unit.col === JUDGE_COL) {
+    return { ok: false, error: "Unit is already in a Judge slot.", match };
+  }
+
+  const targetLane = findJudgeRepositionLane(match, input.side, unit);
+  if (!targetLane) {
+    return { ok: false, error: "No valid free Judge slot for this specialist.", match };
+  }
+  if (match.players[input.side].board[targetLane][JUDGE_COL] !== null) {
+    return { ok: false, error: "Target Judge slot is occupied.", match };
+  }
+
+  match.players[input.side].board[unit.lane][unit.col] = null;
+  unit.lane = targetLane;
+  unit.col = JUDGE_COL;
+  unit.judgeRepositionUsed = true;
+  unit.cannotAttackUntilTurn = Math.max(unit.cannotAttackUntilTurn, match.turn + 1);
+  match.players[input.side].board[targetLane][JUDGE_COL] = unit.id;
+  pushLog(match, `${unit.name} repositioned into ${targetLane} Judge slot. Attack action consumed this turn.`);
+
   match.updatedAt = nowTs();
   return { ok: true, match };
 }
