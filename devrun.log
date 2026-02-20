@@ -1,0 +1,11 @@
+
+> courtofcapital@0.0.0 dev
+> devvit playtest
+
+ »   Warning: connection server error undefined: listen EADDRINUSE: address 
+ »   already in use :::5678
+✔ Build complete (59ms)
+Waiting for `config.server.entry` file (dist\server\index.cjs) to be generated...
+Evaluation failure: Cannot read `config.server.entry` file (dist\server\index.cjs). Make sure the `server.entry` value in devvit.json is correct and that your project is built.
+✔ Client rebuild complete (18898ms)
+✔ Server rebuild complete (27053ms)
