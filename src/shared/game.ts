@@ -10,7 +10,7 @@ export const PVP_LOBBY_RESPONSE_TIMEOUT_MS = 15 * 60 * 1000;
 
 export const PREFIX = "coc:v1";
 
-export type MatchMode = "pve" | "pvp" | "tutorial";
+export type MatchMode = "pve" | "pvp" | "tutorial" | "sandbox";
 export type MatchStatus = "mulligan" | "active" | "finished";
 export type MatchWinReason = "leader" | "verdict" | "concede";
 export type TutorialScenarioId = "core_basics_v1" | "buffs_debuffs_v1" | "judge_dependencies_v1";
@@ -151,6 +151,10 @@ export interface MatchState {
   turn: number;
   activeSide: PlayerSide;
   turnDeadlineAt: number;
+  turnSecondsBySide?: {
+    A?: number;
+    B?: number;
+  };
   mulliganDeadlineAt: number;
   winnerSide?: PlayerSide;
   winReason?: MatchWinReason;

@@ -44,6 +44,14 @@ export interface StartTutorialMatchRequest {
   scenarioId?: TutorialScenarioId;
 }
 
+export interface StartCleanupSandboxRequest {
+  weekId?: string;
+  postId?: string;
+  userId?: string;
+  username?: string;
+  faction?: FactionId;
+}
+
 export interface StartPvpInviteRequest {
   weekId?: string;
   postId?: string;
@@ -134,6 +142,7 @@ export const API_ROUTES = {
   lobby: "/api/lobby",
   matchAi: "/api/match/ai",
   tutorialStart: "/api/tutorial/start",
+  tutorialCleanupStart: "/api/tutorial/cleanup/start",
   tutorialAcknowledge: "/api/tutorial/acknowledge",
   tutorialSkip: "/api/tutorial/skip",
   inviteCreate: "/api/match/invite",

@@ -272,6 +272,26 @@ const SPECIAL_CARD_EFFECTS: Record<string, CardEffectDescriptor> = {
     targetRule: "none",
     summary: "Stun all units on both sides for one turn cycle.",
   },
+  cleanup_rubble: {
+    targetRule: "none",
+    summary: "Sandbox obstacle. No special effect.",
+  },
+  cleanup_suit_rack: {
+    targetRule: "none",
+    summary: "Sandbox obstacle. No special effect.",
+  },
+  cleanup_emergency_cone: {
+    targetRule: "none",
+    summary: "Sandbox obstacle. No special effect.",
+  },
+  cleanup_wet_floor_sign: {
+    targetRule: "none",
+    summary: "Sandbox obstacle. No special effect.",
+  },
+  cleanup_cart: {
+    targetRule: "none",
+    summary: "Sandbox obstacle. No special effect.",
+  },
   audit_committee: {
     targetRule: "ally-unit",
     summary: "Choose friendly unit: +1 max HP, heal 1, add 1 shield; you gain 1 favor and remove 1 probation.",

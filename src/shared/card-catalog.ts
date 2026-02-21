@@ -270,6 +270,62 @@ const globalUtilities: CardDefinition[] = [
   mkNonUnit("utility", { id: "volatility_swaplet", name: "Volatility Swaplet", type: "upgrade", cost: 94, text: "Pocket-size risk transfer." }),
 ];
 
+export const SANDBOX_CLEANUP_CARD_IDS = [
+  "cleanup_rubble",
+  "cleanup_suit_rack",
+  "cleanup_emergency_cone",
+  "cleanup_wet_floor_sign",
+  "cleanup_cart",
+] as const;
+
+const sandboxCleanupCards: CardDefinition[] = [
+  mkUnit("neutral", {
+    id: "cleanup_rubble",
+    name: "Rubble",
+    cost: 0,
+    attack: 3,
+    health: 1,
+    traits: ["any_row"],
+    text: "Cleanup obstacle. No special abilities.",
+  }),
+  mkUnit("neutral", {
+    id: "cleanup_suit_rack",
+    name: "Suit Rack",
+    cost: 0,
+    attack: 3,
+    health: 1,
+    traits: ["any_row"],
+    text: "Cleanup obstacle. No special abilities.",
+  }),
+  mkUnit("neutral", {
+    id: "cleanup_emergency_cone",
+    name: "Emergency Cone",
+    cost: 0,
+    attack: 3,
+    health: 1,
+    traits: ["any_row"],
+    text: "Cleanup obstacle. No special abilities.",
+  }),
+  mkUnit("neutral", {
+    id: "cleanup_wet_floor_sign",
+    name: "Wet Floor Sign",
+    cost: 0,
+    attack: 3,
+    health: 1,
+    traits: ["any_row"],
+    text: "Cleanup obstacle. No special abilities.",
+  }),
+  mkUnit("neutral", {
+    id: "cleanup_cart",
+    name: "Cleanup Cart",
+    cost: 0,
+    attack: 3,
+    health: 1,
+    traits: ["any_row"],
+    text: "Cleanup obstacle. No special abilities.",
+  }),
+];
+
 function convertFactionCards(faction: FactionId, unitsA: UnitSeed[], unitsB: UnitSeed[], utilities: NonUnitSeed[]): CardDefinition[] {
   return [
     ...unitsA.map((s) => mkUnit(faction, s)),
@@ -287,6 +343,7 @@ export const CARD_LIBRARY: Record<string, CardDefinition> = Object.fromEntries(
     ...convertFactionCards("short_hedgefund", shortCombat, shortSupport, shortUtilities),
     ...neutralCards,
     ...globalUtilities,
+    ...sandboxCleanupCards,
   ].map((card) => [card.id, card]),
 );
 
@@ -298,8 +355,14 @@ export const FACTION_CARD_IDS: Record<FactionId, string[]> = {
   short_hedgefund: Object.values(CARD_LIBRARY).filter((c) => c.faction === "short_hedgefund").map((c) => c.id),
 };
 
+const SANDBOX_CLEANUP_ID_SET = new Set<string>(SANDBOX_CLEANUP_CARD_IDS);
+
 export const NEUTRAL_UTILITY_CARD_IDS: string[] = Object.values(CARD_LIBRARY)
-  .filter((c) => c.faction === "neutral" || c.faction === "utility")
+  .filter(
+    (c) =>
+      (c.faction === "neutral" || c.faction === "utility") &&
+      !SANDBOX_CLEANUP_ID_SET.has(c.id),
+  )
   .map((c) => c.id);
 
 export function getCatalogCard(cardId: string): CardDefinition {

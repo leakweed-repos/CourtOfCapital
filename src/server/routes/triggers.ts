@@ -21,7 +21,7 @@ triggers.post("/on-app-install", async (c) => {
     return c.json<TriggerResponse>(
       {
         status: "success",
-        message: `Initialized week ${week.weekId} with post ${week.postId} (${input.type}).`,
+        message: `Initialized week #${week.weekNumber} (${week.weekId}) with post ${week.postId} (${input.type}).`,
       },
       200,
     );

@@ -29,14 +29,16 @@ function readWeekId(postData: unknown): string | null {
 export async function createWeeklyPost(
   context: CreateWeeklyPostContext,
   weekId: string,
+  weekNumber: number,
 ): Promise<{ id: string }> {
   const createdAt = nowTs();
   const post = await context.reddit.submitCustomPost({
     subredditName: context.subredditName,
-    title: `Court of Capital - Weekly Court (${weekId})`,
+    title: `Court of Capital - Weekly Court (#${weekNumber} ${weekId})`,
     entry: "default",
     postData: {
       weekId,
+      weekNumber,
       createdAt,
     },
     textFallback: {

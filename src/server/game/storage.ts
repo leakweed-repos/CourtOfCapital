@@ -55,8 +55,16 @@ function keyCurrentWeek(): string {
   return `${PREFIX}:week:CURRENT`;
 }
 
+function keyCurrentWeekNumber(): string {
+  return `${PREFIX}:week:CURRENT:number`;
+}
+
 function keyWeekPost(weekId: string): string {
   return `${PREFIX}:week:${weekId}:post`;
+}
+
+function keyWeekNumber(weekId: string): string {
+  return `${PREFIX}:week:${weekId}:number`;
 }
 
 function keyWeekLeaderboard(weekId: string, bucket: LeaderboardBucket = "all"): string {
@@ -120,12 +128,44 @@ export async function setCurrentWeekId(redis: RedisLike, weekId: string): Promis
   await redis.set(keyCurrentWeek(), weekId);
 }
 
+export async function getCurrentWeekNumber(redis: RedisLike): Promise<number | null> {
+  const raw = await redis.get(keyCurrentWeekNumber());
+  if (!raw) {
+    return null;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return Math.floor(parsed);
+}
+
+export async function setCurrentWeekNumber(redis: RedisLike, weekNumber: number): Promise<void> {
+  await redis.set(keyCurrentWeekNumber(), String(Math.max(0, Math.floor(weekNumber))));
+}
+
 export async function getWeekPostId(redis: RedisLike, weekId: string): Promise<string | null> {
   return redis.get(keyWeekPost(weekId));
 }
 
 export async function setWeekPostId(redis: RedisLike, weekId: string, postId: string): Promise<void> {
   await redis.set(keyWeekPost(weekId), postId);
+}
+
+export async function getWeekNumber(redis: RedisLike, weekId: string): Promise<number | null> {
+  const raw = await redis.get(keyWeekNumber(weekId));
+  if (!raw) {
+    return null;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+  return Math.floor(parsed);
+}
+
+export async function setWeekNumber(redis: RedisLike, weekId: string, weekNumber: number): Promise<void> {
+  await redis.set(keyWeekNumber(weekId), String(Math.max(0, Math.floor(weekNumber))));
 }
 
 export async function saveMatch(redis: RedisLike, match: MatchState): Promise<void> {

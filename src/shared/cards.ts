@@ -6,8 +6,7 @@ import { getUnitResistanceSummary } from "./resistance";
 
 type CardRow = "1" | "2" | "1/2";
 
-export const DEFAULT_CARD_ART_PATH = "/public/assets/cards/fallback_default.png";
-const ALT_DEFAULT_CARD_ART_PATH = "/assets/cards/fallback_default.png";
+export const DEFAULT_CARD_ART_PATH = "/assets/cards/fallback_default.png";
 
 export type CardPreviewMeta = {
   id: string;
@@ -38,26 +37,9 @@ function rowFromTraits(cardId: string, traits: CardDefinition["traits"]): CardRo
 }
 
 function buildArtPaths(card: CardDefinition): { artPath: string; artFallbackPath: string; artFallbackPaths: string[] } {
-  const preferredSvg = `/public/assets/cards/${card.faction}/${card.id}.svg`;
-  const preferredPng = `/public/assets/cards/${card.faction}/${card.id}.png`;
-  const rootSvg = `/public/assets/cards/${card.id}.svg`;
-  const rootPng = `/public/assets/cards/${card.id}.png`;
-  const altSvg = `/assets/cards/${card.faction}/${card.id}.svg`;
-  const altPng = `/assets/cards/${card.faction}/${card.id}.png`;
-  const altRootSvg = `/assets/cards/${card.id}.svg`;
-  const altRootPng = `/assets/cards/${card.id}.png`;
-
-  const fallbackPaths = [
-    preferredPng,
-    rootSvg,
-    rootPng,
-    altSvg,
-    altPng,
-    altRootSvg,
-    altRootPng,
-    DEFAULT_CARD_ART_PATH,
-    ALT_DEFAULT_CARD_ART_PATH,
-  ];
+  const preferredSvg = `/assets/cards/${card.faction}/${card.id}.svg`;
+  const preferredPng = `/assets/cards/${card.faction}/${card.id}.png`;
+  const fallbackPaths = [preferredPng, DEFAULT_CARD_ART_PATH];
 
   return {
     artPath: preferredSvg,
@@ -119,7 +101,7 @@ export function getCardPreview(cardId: string): CardPreviewMeta {
       traits: [],
       artPath: DEFAULT_CARD_ART_PATH,
       artFallbackPath: DEFAULT_CARD_ART_PATH,
-      artFallbackPaths: [ALT_DEFAULT_CARD_ART_PATH],
+      artFallbackPaths: [],
     }
   );
 }

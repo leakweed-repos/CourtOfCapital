@@ -35,7 +35,7 @@
     "tasks": {
       "weekly-rollover": {
         "endpoint": "/internal/cron/weekly-rollover",
-        "cron": "0 0 * * 1"
+        "cron": "0 6 * * 0"
       }
     }
   },

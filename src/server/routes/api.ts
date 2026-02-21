@@ -29,6 +29,7 @@ import {
   skipTutorial,
   validateTutorialAction,
 } from "../game/tutorial";
+import { setupCleanupSandboxMatch } from "../game/sandbox";
 import {
   createRedisLike,
   getCurrentWeekId,
@@ -169,7 +170,7 @@ async function finalizeIfFinished(redisLike: RedisLike, wasFinished: boolean, ma
   if (match.status !== "finished" || !match.winnerSide) {
     return;
   }
-  if (match.mode === "tutorial") {
+  if (match.mode === "tutorial" || match.mode === "sandbox") {
     return;
   }
 
@@ -218,6 +219,31 @@ async function closeActiveTutorialMatchesForUser(userId: string, now: number): P
       one.tutorial.actionHint = "Open the latest tutorial from lobby.";
       one.tutorial.canSkip = false;
     }
+    await saveMatch(storageRedis, one);
+  }
+}
+
+async function closeActiveSandboxMatchesForUser(userId: string, now: number): Promise<void> {
+  const userMatchIds = await listUserMatchIds(storageRedis, userId);
+  for (const matchId of userMatchIds) {
+    const one = await getMatch(storageRedis, matchId);
+    if (!one || one.mode !== "sandbox" || one.status === "finished") {
+      continue;
+    }
+    const side = sideForUser(one, userId);
+    if (!side) {
+      continue;
+    }
+    one.status = "finished";
+    one.winReason = "concede";
+    one.winnerSide = opponentOf(side);
+    one.turnDeadlineAt = now;
+    one.updatedAt = now;
+    one.log.push({
+      at: now,
+      turn: one.turn,
+      text: "Sandbox closed: a newer cleanup run was started.",
+    });
     await saveMatch(storageRedis, one);
   }
 }
@@ -314,7 +340,7 @@ api.post("/lobby", async (c) => {
       const summary = toLobbyMatchSummary(one);
       if (one.mode === "pvp") {
         pvpMatchSummaries.push(summary);
-      } else if (one.mode === "tutorial") {
+      } else if (one.mode === "tutorial" || one.mode === "sandbox") {
         tutorialMatchSummaries.push(summary);
       } else {
         quickPlayMatchSummaries.push(summary);
@@ -457,6 +483,51 @@ api.post("/tutorial/start", async (c) => {
   };
 
   const match = setupTutorialMatch(createInitialMatch(initInput, now), scenarioId, now);
+  await saveMatch(storageRedis, match);
+  await indexMatchForUser(storageRedis, actor.userId, match.id);
+
+  return ok(c, {
+    result: {
+      ok: true,
+      match,
+    } satisfies MatchActionResult,
+  });
+});
+
+api.post("/tutorial/cleanup/start", async (c) => {
+  const actor = requireActor();
+  if (!actor.ok) {
+    return fail(c, actor.error, actor.status);
+  }
+
+  const weekState = await ensureActivePost(storageRedis);
+  if (!weekState.ok) {
+    return fail(c, weekState.error, weekState.status);
+  }
+
+  const body = (await c.req.json()) as { faction?: FactionId };
+  const now = nowTs();
+  await closeActiveSandboxMatchesForUser(actor.userId, now);
+
+  const initInput: StartMatchInput = {
+    weekId: weekState.weekId,
+    postId: weekState.postId,
+    mode: "sandbox",
+    playerA: {
+      userId: actor.userId,
+      username: actor.username,
+      faction: body.faction ?? DEFAULT_FACTION,
+    },
+    playerB: {
+      userId: "wozny",
+      username: "wozny",
+      faction: "market_makers",
+      isBot: true,
+    },
+    seed: freshMatchSeed(`${weekState.weekId}:${actor.userId}:sandbox:${now}`),
+  };
+
+  const match = setupCleanupSandboxMatch(createInitialMatch(initInput, now), now);
   await saveMatch(storageRedis, match);
   await indexMatchForUser(storageRedis, actor.userId, match.id);
 

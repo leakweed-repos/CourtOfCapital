@@ -16,6 +16,16 @@ internal.route("/cron", cron);
 app.route("/api", api);
 app.route("/internal", internal);
 
+app.onError((err, c) => {
+  console.error("[server] unhandled error", {
+    method: c.req.method,
+    path: c.req.path,
+    message: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
+  return c.json({ ok: false, error: "Internal server error" }, 500);
+});
+
 serve({
   fetch: app.fetch,
   createServer,

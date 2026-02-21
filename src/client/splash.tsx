@@ -12,8 +12,20 @@ function readWeekId(): string {
   return typeof weekId === "string" && weekId.trim().length > 0 ? weekId : "unknown-week";
 }
 
+function readWeekNumber(): number {
+  if (!context.postData || typeof context.postData !== "object") {
+    return 0;
+  }
+  const weekNumber = (context.postData as Record<string, unknown>).weekNumber;
+  if (typeof weekNumber === "number" && Number.isFinite(weekNumber) && weekNumber >= 0) {
+    return Math.floor(weekNumber);
+  }
+  return 0;
+}
+
 export function Splash() {
   const weekId = readWeekId();
+  const weekNumber = readWeekNumber();
   const webViewMode = getWebViewMode();
   const platformClass = context.client?.name === "ANDROID" || context.client?.name === "IOS" ? "platform-mobile" : "platform-desktop";
 
@@ -24,7 +36,7 @@ export function Splash() {
         <h1>Court of Capital</h1>
         <p className="splash-lead">Build market pressure, sway the judge, and close the week at the top of the board.</p>
         <div className="status-row splash-metrics">
-          <span className="badge">Week {weekId}</span>
+          <span className="badge">Week #{weekNumber} {weekId}</span>
           <span className="badge">Turn 35s</span>
           <span className="badge">Mulligan 10s</span>
           <span className="badge">Deck 100</span>
@@ -33,7 +45,7 @@ export function Splash() {
           <button className="action-btn action-btn--primary splash-enter" onClick={(e) => requestExpandedMode(e.nativeEvent, "game")}>
             Enter Court
           </button>
-          <p className="subtle">Operator: u/{context.username ?? "guest"}</p>
+          <p className="subtle">Week #{weekNumber} {weekId} · Serve the Justice or be the Justice</p>
         </div>
       </section>
 

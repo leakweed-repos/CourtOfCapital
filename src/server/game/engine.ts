@@ -37,6 +37,7 @@ import {
   simpleAiPreferredCol,
 } from "./models";
 import { getCardEffectDescriptor, type CardTargetRule } from "../../shared/card-effects";
+import { SANDBOX_CLEANUP_CARD_IDS } from "../../shared/card-catalog";
 import {
   getJudgeSpecialistProfile,
   type JudgeBlueRider,
@@ -47,8 +48,10 @@ import { getResistanceChance, type ResistanceKind } from "../../shared/resistanc
 import { getUnitSignatureProfile } from "../../shared/unit-signatures";
 import { isJudgeCorruptSpecialistCard, isJudgePositiveSpecialistCard, isJudgeSpecialistCard } from "../../shared/placement";
 import { tutorialTickPause } from "./tutorial";
+import { isSandboxCleanupCard } from "./sandbox";
 
 const MAX_LOG = 60;
+const BOARD_LANES: Array<"front" | "back"> = ["front", "back"];
 const EXPLICIT_UNIT_SKILL_IDS = new Set<string>([
   "guild_bailiff",
   "market_arbiter",
@@ -94,6 +97,14 @@ function nextRoll(match: MatchState, label: string): number {
   const out = seededUnitFloat(match.seed, salt);
   match.rngCounter += 1;
   return out;
+}
+
+function turnSecondsForSide(match: MatchState, side: PlayerSide): number {
+  const override = match.turnSecondsBySide?.[side];
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    return Math.max(1, Math.floor(override));
+  }
+  return TURN_SECONDS;
 }
 
 function drawOne(match: MatchState, side: PlayerSide): string | null {
@@ -2442,7 +2453,7 @@ function startTurn(match: MatchState): void {
   applyJudgeLaneInfluence(match, active);
   applyFactionTurnStart(match, active);
   drawOne(match, active);
-  if (match.mode !== "tutorial") {
+  if (match.mode !== "tutorial" && match.mode !== "sandbox") {
     applyRandomEvent(match);
     if ((match.status as string) === "finished") {
       return;
@@ -2461,7 +2472,7 @@ function startTurn(match: MatchState): void {
     }
   }
 
-  match.turnDeadlineAt = nowTs() + TURN_SECONDS * 1000;
+  match.turnDeadlineAt = nowTs() + turnSecondsForSide(match, active) * 1000;
   pushLog(match, `Turn ${match.turn} started for ${active}.`);
 }
 
@@ -2840,8 +2851,9 @@ export function attack(match: MatchState, input: AttackInput): MatchActionResult
 
     if (targetDied) {
       removeUnit(match, target.id);
-      match.players[input.side].shares += 90;
-      pushLog(match, `${target.name} removed. ${input.side} gains 90 shares.`);
+      const killReward = match.mode === "sandbox" && isSandboxCleanupCard(target.cardId) ? 25 : 90;
+      match.players[input.side].shares += killReward;
+      pushLog(match, `${target.name} removed. ${input.side} gains ${killReward} shares.`);
     }
 
     if (attackerDied) {
@@ -3095,6 +3107,36 @@ export function maybeRunBot(match: MatchState): MatchState {
   const side = match.activeSide;
   const player = match.players[side];
   if (!player.isBot) {
+    return match;
+  }
+
+  if (match.mode === "sandbox" && side === "B") {
+    const freeSlots: Array<{ lane: "front" | "back"; col: number }> = [];
+    for (const lane of BOARD_LANES) {
+      for (let col = 0; col < BOARD_COLS; col += 1) {
+        if (player.board[lane][col] === null) {
+          freeSlots.push({ lane, col });
+        }
+      }
+    }
+
+    if (freeSlots.length > 0) {
+      const slotIdx = Math.floor(nextRoll(match, "sandbox:spawn:slot") * freeSlots.length);
+      const slot = freeSlots[slotIdx];
+      const cardIdx = Math.floor(nextRoll(match, "sandbox:spawn:card") * SANDBOX_CLEANUP_CARD_IDS.length);
+      const cardId = SANDBOX_CLEANUP_CARD_IDS[cardIdx] ?? SANDBOX_CLEANUP_CARD_IDS[0];
+      if (slot && cardId) {
+        const spawned = slotUnit(match, side, slot.lane, slot.col, cardId);
+        spawned.shieldCharges = 3;
+        pushLog(match, `Wozny deployed ${spawned.name} to ${slot.lane} ${slot.col + 1}.`);
+      }
+    } else {
+      pushLog(match, "Wozny found no free cleanup slot this turn.");
+    }
+
+    if (match.status === "active" && match.activeSide === side) {
+      endTurn(match, side);
+    }
     return match;
   }
 

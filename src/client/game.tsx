@@ -13,6 +13,7 @@ import { getCardPreview } from "../shared/cards";
 import {
   type EventUnitState,
   JUDGE_COL,
+  type MatchLogEntry,
   normalizeUsername,
   type FactionId,
   type InviteState,
@@ -29,6 +30,7 @@ import "./index.css";
 
 type UiContext = {
   weekId: string;
+  weekNumber: number;
   postId: string;
   userId: string;
   username: string;
@@ -65,11 +67,11 @@ type CoachmarkPosition = {
 type LobbyTab = "quick" | "pvp" | "tutorial";
 
 const FACTIONS: Array<{ id: FactionId; label: string; motto: string; tone: string }> = [
-  { id: "wallstreet", label: "Wallstreet", motto: "Premium alpha desks", tone: "tempo + scaling" },
-  { id: "sec", label: "SEC", motto: "Audits and injunctions", tone: "control + disruption" },
-  { id: "market_makers", label: "Market Makers", motto: "Spread and liquidity loops", tone: "value + utility" },
-  { id: "short_hedgefund", label: "Short Hedgefund", motto: "Pressure through leverage", tone: "risk + burst" },
   { id: "retail_mob", label: "Retail Mob", motto: "Momentum swarms", tone: "wide board + spikes" },
+  { id: "short_hedgefund", label: "Short Hedgefund", motto: "Pressure through leverage", tone: "risk + burst" },
+  { id: "market_makers", label: "Market Makers", motto: "Spread and liquidity loops", tone: "value + utility" },
+  { id: "sec", label: "SEC", motto: "Audits and injunctions", tone: "control + disruption" },
+  { id: "wallstreet", label: "Wallstreet", motto: "Premium alpha desks", tone: "tempo + scaling" },
 ];
 
 const TUTORIAL_SCENARIOS: Array<{ id: TutorialScenarioId; label: string; subtitle: string }> = [
@@ -96,10 +98,22 @@ function readWeekIdFromPostData(): string {
   return typeof weekId === "string" && weekId.trim().length > 0 ? weekId : "unknown-week";
 }
 
+function readWeekNumberFromPostData(): number {
+  if (!context.postData || typeof context.postData !== "object") {
+    return 0;
+  }
+  const weekNumber = (context.postData as Record<string, unknown>).weekNumber;
+  if (typeof weekNumber === "number" && Number.isFinite(weekNumber) && weekNumber >= 0) {
+    return Math.floor(weekNumber);
+  }
+  return 0;
+}
+
 function readContext(): UiContext {
   const clientName = context.client?.name;
   return {
     weekId: readWeekIdFromPostData(),
+    weekNumber: readWeekNumberFromPostData(),
     postId: context.postId ?? "",
     userId: context.userId ?? "",
     username: normalizeUsername(context.username ?? "guest"),
@@ -117,8 +131,8 @@ function enemyOf(side: PlayerSide): PlayerSide {
   return side === "A" ? "B" : "A";
 }
 
-function secsLeft(deadlineAt: number): number {
-  return Math.max(0, Math.ceil((deadlineAt - Date.now()) / 1000));
+function secsLeft(deadlineAt: number, now = Date.now()): number {
+  return Math.max(0, Math.ceil((deadlineAt - now) / 1000));
 }
 
 function shortId(id: string): string {
@@ -159,6 +173,9 @@ function summarizeResumeMatch(match: LobbyMatchSummary, selfUserId: string): str
   if (match.mode === "pvp") {
     return `PvP: ${opp} vs. ${me}`;
   }
+  if (match.mode === "sandbox") {
+    return `Cleanup Playground vs. ${me}`;
+  }
   return `Tutorial vs. ${me}`;
 }
 
@@ -168,6 +185,13 @@ function tutorialScenarioLabel(id?: TutorialScenarioId): string {
   }
   const one = TUTORIAL_SCENARIOS.find((row) => row.id === id);
   return one?.label ?? id;
+}
+
+function tutorialResumeLabel(summary: LobbyMatchSummary): string {
+  if (summary.mode === "sandbox") {
+    return "Cleanup Playground";
+  }
+  return tutorialScenarioLabel(summary.tutorialScenarioId);
 }
 
 function factionLabel(faction: string): string {
@@ -215,13 +239,38 @@ type UnitStatusToken = {
   key: UnitStatusTokenKey;
   short: string;
   title: string;
+  detail?: string;
 };
 
 const STATUS_LEGEND: UnitStatusToken[] = [
-  { key: "shield", short: "SH", title: "Shield: blocks incoming hit damage." },
-  { key: "atk-down", short: "ATK-", title: "Attack down: temporary attack reduction." },
-  { key: "stun", short: "STN", title: "Stun: unit cannot attack this round." },
-  { key: "exposed", short: "EXP", title: "Exposed: takes +1 combat damage." },
+  {
+    key: "shield",
+    short: "SH",
+    title: "Shield: blocks incoming hit damage.",
+    detail:
+      "Each shield charge blocks one incoming hit packet before HP loss. Example: 2 SH can absorb two separate hits, regardless of source.",
+  },
+  {
+    key: "atk-down",
+    short: "ATK-",
+    title: "Attack down: temporary attack reduction.",
+    detail:
+      "ATK- lowers the unit's attack value for the current effect window. Reduced attack lowers outgoing combat damage and counter damage.",
+  },
+  {
+    key: "stun",
+    short: "STN",
+    title: "Stun: unit cannot attack this round.",
+    detail:
+      "Stunned units stay on board but cannot declare attacks until stun expires. They can still be targeted, damaged, buffed, or cleansed.",
+  },
+  {
+    key: "exposed",
+    short: "EXP",
+    title: "Exposed: takes +1 combat damage.",
+    detail:
+      "Exposed increases damage taken in combat exchanges. Great for focus-fire and finishing fragile targets before they recover.",
+  },
 ];
 
 function unitStatusTokens(unit: MatchState["units"][string], turn: number): UnitStatusToken[] {
@@ -235,11 +284,18 @@ function unitStatusTokens(unit: MatchState["units"][string], turn: number): Unit
       title: `Shield: blocks the next ${shields} hit${plural}.`,
     });
   }
-  if ((unit.tempAttackPenalty ?? 0) > 0 && (unit.tempAttackPenaltyUntilTurn ?? 0) >= turn) {
+  const baseAttack = getCardPreview(unit.cardId).attack ?? (unit.attack ?? 0);
+  const currentAttack = unit.attack ?? 0;
+  const totalAttackDown = Math.max(0, baseAttack - currentAttack);
+  const temporaryAttackDown = (unit.tempAttackPenalty ?? 0) > 0 && (unit.tempAttackPenaltyUntilTurn ?? 0) >= turn;
+  if (temporaryAttackDown || totalAttackDown > 0) {
+    const shownPenalty = temporaryAttackDown ? unit.tempAttackPenalty ?? 0 : totalAttackDown;
     tokens.push({
       key: "atk-down",
-      short: `ATK-${unit.tempAttackPenalty}`,
-      title: `Attack down: -${unit.tempAttackPenalty} attack until this round ends.`,
+      short: `ATK-${shownPenalty}`,
+      title: temporaryAttackDown
+        ? `Attack down: -${shownPenalty} attack until this round ends.`
+        : `Attack down: current attack is ${shownPenalty} below base.`,
     });
   }
   if ((unit.stunnedUntilTurn ?? 0) > turn) {
@@ -257,23 +313,6 @@ function unitStatusTokens(unit: MatchState["units"][string], turn: number): Unit
     });
   }
   return tokens;
-}
-
-function StatusChips({ unit, turn }: { unit: MatchState["units"][string]; turn: number }) {
-  const statuses = unitStatusTokens(unit, turn);
-  if (statuses.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="slot-status-row" aria-label="Unit statuses">
-      {statuses.map((status) => (
-        <span key={`${status.key}-${status.short}`} className={`status-chip status-${status.key}`} title={status.title}>
-          {status.short}
-        </span>
-      ))}
-    </div>
-  );
 }
 
 function oneLine(text: string): string {
@@ -316,6 +355,132 @@ function streetLoreText(flavorText: string): string {
   return cleaned;
 }
 
+function ordinal(value: number): string {
+  const abs = Math.abs(value);
+  const mod100 = abs % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${value}th`;
+  const mod10 = abs % 10;
+  if (mod10 === 1) return `${value}st`;
+  if (mod10 === 2) return `${value}nd`;
+  if (mod10 === 3) return `${value}rd`;
+  return `${value}th`;
+}
+
+function sideUserLabel(match: MatchState, side: PlayerSide): string {
+  const username = match.players[side].username || `side-${side}`;
+  const p = side === "A" ? "P1" : "P2";
+  return `${p}/${username}`;
+}
+
+function sideUserName(match: MatchState, side: PlayerSide): string {
+  return match.players[side].username || `side-${side}`;
+}
+
+function withNamedSides(match: MatchState, text: string): string {
+  return text
+    .replace(/\bleader A\b/g, `leader ${sideUserName(match, "A")}`)
+    .replace(/\bleader B\b/g, `leader ${sideUserName(match, "B")}`)
+    .replace(/\bfor A\b/g, `for ${sideUserLabel(match, "A")}`)
+    .replace(/\bfor B\b/g, `for ${sideUserLabel(match, "B")}`)
+    .replace(/\bto A\b/g, `to ${sideUserLabel(match, "A")}`)
+    .replace(/\bto B\b/g, `to ${sideUserLabel(match, "B")}`);
+}
+
+function formatMatchLogLine(match: MatchState, entry: MatchLogEntry): string {
+  const raw = oneLine(entry.text);
+
+  const placedBySide = raw.match(/^([AB]) played (.+?) to (front|back) (\d+)\.$/);
+  if (placedBySide) {
+    const side = placedBySide[1] as PlayerSide;
+    const cardName = placedBySide[2] ?? "card";
+    const lane = placedBySide[3] ?? "front";
+    const col = Number(placedBySide[4] ?? "1");
+    return `T${entry.turn} · ${sideUserLabel(match, side)}: placed ${cardName} on ${ordinal(col)} ${lane} row.`;
+  }
+
+  const woznyPlaced = raw.match(/^Wozny deployed (.+?) to (front|back) (\d+)\.$/);
+  if (woznyPlaced) {
+    const cardName = woznyPlaced[1] ?? "unit";
+    const lane = woznyPlaced[2] ?? "front";
+    const col = Number(woznyPlaced[3] ?? "1");
+    return `T${entry.turn} · Bailiff AI: placed ${cardName} on ${ordinal(col)} ${lane} row.`;
+  }
+
+  const dealtLeader = raw.match(/^(.+?) hit leader ([AB]) for (\d+)\.$/);
+  if (dealtLeader) {
+    const attacker = dealtLeader[1] ?? "Unit";
+    const targetSide = dealtLeader[2] as PlayerSide;
+    const damage = dealtLeader[3] ?? "0";
+    return `T${entry.turn} · ${attacker} dealt ${damage} damage to ${sideUserName(match, targetSide)} hero.`;
+  }
+
+  const dealtUnit = raw.match(/^(.+?) dealt (\d+) to (.+?)\.$/);
+  if (dealtUnit) {
+    const attacker = dealtUnit[1] ?? "Unit";
+    const damage = dealtUnit[2] ?? "0";
+    const target = dealtUnit[3] ?? "target";
+    return `T${entry.turn} · ${attacker} dealt ${damage} damage to ${target}.`;
+  }
+
+  const countered = raw.match(/^(.+?) countered (.+?) for (\d+)\.$/);
+  if (countered) {
+    const attacker = countered[1] ?? "Unit";
+    const target = countered[2] ?? "target";
+    const damage = countered[3] ?? "0";
+    return `T${entry.turn} · ${attacker} countered ${target} for ${damage}.`;
+  }
+
+  const blockedByShield = raw.match(/^(.+?) blocked (.+?) with shield\.$/);
+  if (blockedByShield) {
+    const defender = blockedByShield[1] ?? "Unit";
+    const source = blockedByShield[2] ?? "attack";
+    return `T${entry.turn} · ${defender} blocked 1 shield layer (${source}).`;
+  }
+
+  const withActorPrefix = raw.match(/^([AB]) (.+)$/);
+  if (withActorPrefix) {
+    const side = withActorPrefix[1] as PlayerSide;
+    const action = withNamedSides(match, withActorPrefix[2] ?? "");
+    return `T${entry.turn} · ${sideUserLabel(match, side)}: ${action}`;
+  }
+
+  return `T${entry.turn} · ${withNamedSides(match, raw)}`;
+}
+
+function isHighSignalToastLine(line: string): boolean {
+  const text = oneLine(line).toLowerCase();
+  if (!text) {
+    return false;
+  }
+  if (text.includes(": placed ")) {
+    return false;
+  }
+  if (text.includes("start turn")) {
+    return false;
+  }
+
+  const highSignalPatterns: RegExp[] = [
+    /\bdealt \d+ damage\b/,
+    /\bcountered\b/,
+    /\bblocked 1 shield layer\b/,
+    /\bshield\b/,
+    /\bheal(?:ed)?\b/,
+    /\bstun(?:ned)?\b/,
+    /\bexposed\b/,
+    /\batk-?down\b/,
+    /\bprobation\b/,
+    /\bshares\b/,
+    /\bdebt\b/,
+    /\biron curtain\b/,
+    /\bconfiscat/i,
+    /\bdestroyed\b/,
+    /\bdefeated\b/,
+    /\bverdict\b/,
+    /\bwins?\b/,
+  ];
+  return highSignalPatterns.some((pattern) => pattern.test(text));
+}
+
 function applyArtFallback(event: ReactSyntheticEvent<HTMLImageElement>): void {
   const image = event.currentTarget;
   const chainRaw = image.dataset.fallbackChain ?? "";
@@ -339,6 +504,7 @@ function applyArtFallback(event: ReactSyntheticEvent<HTMLImageElement>): void {
 }
 
 type CardPreview = ReturnType<typeof getCardPreview>;
+const HAND_ONBOARD_FALLBACK_PATH = "/assets/cards/fallback_default_ob.png";
 
 function isJudgeSlot(lane: "front" | "back", col: number): boolean {
   return col === JUDGE_COL && (lane === "front" || lane === "back");
@@ -392,6 +558,47 @@ function elementCenter(el: Element): { x: number; y: number } {
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
 }
 
+function handOnboardArtPath(card: CardPreview): string {
+  return `/assets/cards/${card.faction}/onboard/${card.id}_ob.png`;
+}
+
+function BoardUnitTile({ unit, turn }: { unit: MatchState["units"][string]; turn: number }) {
+  const statuses = unitStatusTokens(unit, turn);
+  const nonShieldStatuses = statuses.filter((status) => status.key !== "shield");
+  const shieldCount = unit.shieldCharges ?? 0;
+  const card = getCardPreview(unit.cardId);
+  const avatarPath = handOnboardArtPath(card);
+
+  return (
+    <div className="slot-body board-unit-tile">
+      <img
+        className="board-unit-avatar"
+        src={avatarPath}
+        data-fallback-src={HAND_ONBOARD_FALLBACK_PATH}
+        alt=""
+        aria-hidden="true"
+        loading="lazy"
+        onError={applyArtFallback}
+      />
+      {nonShieldStatuses.length > 0 ? (
+        <div className="board-unit-status-col" aria-label="Unit statuses">
+          {nonShieldStatuses.map((status) => (
+            <span key={`${status.key}-${status.short}`} className={`board-unit-status status-${status.key}`} title={status.title}>
+              {status.short}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="board-unit-combat">
+        <span>atk {unit.attack}</span>
+        <span>hp {unit.health}</span>
+      </div>
+      {shieldCount > 0 ? <span className="board-unit-shield" title={`Shield: ${shieldCount}`}>{shieldCount}sh</span> : null}
+      <span className="board-unit-name">{compactName(unit.name ?? "-", 11)}</span>
+    </div>
+  );
+}
+
 export function GameApp() {
   const ctx = useMemo(readContext, []);
   const webViewMode = getWebViewMode();
@@ -400,6 +607,13 @@ export function GameApp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
+  const [eventToast, setEventToast] = useState("");
+  const [eventToastQueue, setEventToastQueue] = useState<string[]>([]);
+  const [renderNowMs, setRenderNowMs] = useState(() => Date.now());
+  const [serverClockSkewMs, setServerClockSkewMs] = useState(0);
+  const [showLog, setShowLog] = useState(false);
+  const [showStatusGuide, setShowStatusGuide] = useState(false);
+  const [activeStatusGuideKey, setActiveStatusGuideKey] = useState<UnitStatusTokenKey>("shield");
   const [lobbyTab, setLobbyTab] = useState<LobbyTab>("quick");
   const [quickLeaderboardLevel, setQuickLeaderboardLevel] = useState<1 | 2 | 3>(1);
   const [selectedTutorialScenario, setSelectedTutorialScenario] = useState<TutorialScenarioId>("core_basics_v1");
@@ -421,8 +635,9 @@ export function GameApp() {
   });
 
   const [inviteTarget, setInviteTarget] = useState("");
-  const [selectedFaction, setSelectedFaction] = useState<FactionId>("market_makers");
-  const [selectedPvpFaction, setSelectedPvpFaction] = useState<FactionId>("market_makers");
+  const [selectedFaction, setSelectedFaction] = useState<FactionId>("retail_mob");
+  const [selectedPvpFaction, setSelectedPvpFaction] = useState<FactionId>("retail_mob");
+  const [selectedTutorialFaction, setSelectedTutorialFaction] = useState<FactionId>("retail_mob");
   const [activePvpLobby, setActivePvpLobby] = useState<PvpLobbyState | null>(null);
   const [pvpJoinPulse, setPvpJoinPulse] = useState(false);
   const [match, setMatch] = useState<MatchState | null>(null);
@@ -445,9 +660,32 @@ export function GameApp() {
   const [enemyInspectJudge, setEnemyInspectJudge] = useState(false);
   const [coachmarkPosition, setCoachmarkPosition] = useState<CoachmarkPosition | null>(null);
   const remoteAnimatingRef = useRef(false);
+  const attackInputCooldownUntilRef = useRef(0);
   const pvpJoinedPrevRef = useRef(false);
   const matchRef = useRef<MatchState | null>(null);
+  const seenLogCursorRef = useRef<{ matchId: string; index: number } | null>(null);
   const battleShellRef = useRef<HTMLElement | null>(null);
+
+  function enqueueEventToasts(lines: string[]): void {
+    const sanitized = lines
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (sanitized.length === 0) {
+      return;
+    }
+    setEventToastQueue((prev) => {
+      const next = [...prev, ...sanitized];
+      if (next.length <= 80) {
+        return next;
+      }
+      return next.slice(next.length - 80);
+    });
+  }
+
+  function openStatusGuide(key: UnitStatusTokenKey): void {
+    setActiveStatusGuideKey(key);
+    setShowStatusGuide(true);
+  }
 
   async function loadLobby(): Promise<void> {
     setLoading(true);
@@ -567,6 +805,31 @@ export function GameApp() {
     }
 
     setInfo(`${tutorialScenarioLabel(scenarioId)} started.`);
+    matchRef.current = response.data.result.match;
+    setMatch(response.data.result.match);
+    setSelectedHandIndex(null);
+  }
+
+  async function startCleanupSandbox(faction: FactionId): Promise<void> {
+    setLoading(true);
+    setError("");
+
+    const response = await postJson(API_ROUTES.tutorialCleanupStart, {
+      weekId: ctx.weekId,
+      postId: ctx.postId,
+      userId: ctx.userId,
+      username: ctx.username,
+      faction,
+    });
+
+    setLoading(false);
+
+    if (!response.ok || !response.data.result.ok) {
+      setError(response.ok ? response.data.result.error ?? "Failed to start cleanup playground." : response.error);
+      return;
+    }
+
+    setInfo("Cleanup Playground started.");
     matchRef.current = response.data.result.match;
     setMatch(response.data.result.match);
     setSelectedHandIndex(null);
@@ -711,7 +974,7 @@ export function GameApp() {
     await loadLobby();
   }
 
-  async function runAction(route: string, action: Record<string, unknown>): Promise<void> {
+  async function runAction(route: string, action: Record<string, unknown>, options?: { clearArmed?: boolean }): Promise<void> {
     if (!match) return;
 
     const response = await postJson(route, {
@@ -733,7 +996,9 @@ export function GameApp() {
 
     setError("");
     setMatch(response.data.result.match);
-    setArmedAttackerUnitId(null);
+    if (options?.clearArmed !== false) {
+      setArmedAttackerUnitId(null);
+    }
   }
 
   async function acknowledgeTutorialTip(): Promise<void> {
@@ -991,21 +1256,76 @@ export function GameApp() {
   }
 
   async function runAttackWithAnimation(side: PlayerSide, attackerUnitId: string, target: AttackTarget): Promise<void> {
+    const now = Date.now();
+    if (now < attackInputCooldownUntilRef.current) {
+      return;
+    }
+    attackInputCooldownUntilRef.current = now + 160;
+
+    // Disarm only the attacker being used now; keep any later quick re-selection intact.
+    setArmedAttackerUnitId((prev) => (prev === attackerUnitId ? null : prev));
+    const actionPromise = runAction(
+      API_ROUTES.matchAttack,
+      {
+        side,
+        attackerUnitId,
+        target,
+      },
+      { clearArmed: false },
+    );
     await playAttackAnimation(attackerUnitId, target);
-    await runAction(API_ROUTES.matchAttack, {
-      side,
-      attackerUnitId,
-      target,
-    });
+    await actionPromise;
+  }
+
+  function clearActiveSelection(options?: { clearEnemyInspect?: boolean }): void {
+    setSelectedHandIndex(null);
+    setExpandedCardId(null);
+    setArmedAttackerUnitId(null);
+    setAllyInspectCardId(null);
+    if (options?.clearEnemyInspect) {
+      setEnemyInspectUnitId(null);
+      setEnemyInspectEventId(null);
+      setEnemyInspectJudge(false);
+    }
+  }
+
+  function handleGlobalBattleDeselectClick(target: EventTarget | null): void {
+    if (!target || !(target instanceof Element)) {
+      return;
+    }
+    const hasActiveSelection = selectedHandIndex !== null || armedAttackerUnitId !== null || allyInspectCardId !== null;
+    if (!hasActiveSelection) {
+      return;
+    }
+
+    const keepSelectionSelectors = [
+      ".slot",
+      ".hand-card",
+      ".leader-pill",
+      ".judge-avatar",
+      ".action-btn",
+      ".close-btn",
+      ".leverage-btn",
+      ".badge-btn",
+      ".status-chip-btn",
+      ".hud-timer-orb",
+      ".text-input",
+      ".tutorial-coach-bubble",
+      ".battle-log-modal",
+      ".full-preview",
+      ".mulligan-card",
+    ].join(", ");
+
+    if (target.closest(keepSelectionSelectors)) {
+      return;
+    }
+    clearActiveSelection();
   }
 
   function onHandCardTap(idx: number, cardId: string): void {
     setExpandedCardId(null);
     setArmedAttackerUnitId(null);
     setAllyInspectCardId(cardId);
-    setEnemyInspectUnitId(null);
-    setEnemyInspectEventId(null);
-    setEnemyInspectJudge(false);
     centerHandCard(idx);
     if (selectedHandIndex === idx) {
       setExpandedCardId(cardId);
@@ -1062,6 +1382,31 @@ export function GameApp() {
   }, [match]);
 
   useEffect(() => {
+    if (!match) {
+      seenLogCursorRef.current = null;
+      setEventToast("");
+      setEventToastQueue([]);
+      setShowLog(false);
+      return;
+    }
+    const cursor = seenLogCursorRef.current;
+    if (!cursor || cursor.matchId !== match.id) {
+      seenLogCursorRef.current = { matchId: match.id, index: match.log.length };
+      setEventToast("");
+      setEventToastQueue([]);
+      return;
+    }
+    if (match.log.length <= cursor.index) {
+      seenLogCursorRef.current = { matchId: match.id, index: match.log.length };
+      return;
+    }
+    const newLines = match.log.slice(cursor.index).map((entry) => formatMatchLogLine(match, entry));
+    const keyLines = newLines.filter(isHighSignalToastLine);
+    seenLogCursorRef.current = { matchId: match.id, index: match.log.length };
+    enqueueEventToasts(keyLines);
+  }, [match]);
+
+  useEffect(() => {
     if (!match) return;
     if (enemyInspectUnitId && !match.units[enemyInspectUnitId]) {
       setEnemyInspectUnitId(null);
@@ -1071,11 +1416,28 @@ export function GameApp() {
     }
   }, [match, enemyInspectUnitId, enemyInspectEventId]);
 
+  const activeMatchId = match?.id ?? null;
+  const activeMatchUpdatedAt = match?.updatedAt ?? null;
+
+  useEffect(() => {
+    if (!activeMatchId) return;
+    const id = window.setInterval(() => {
+      setRenderNowMs(Date.now());
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [activeMatchId]);
+
+  useEffect(() => {
+    if (typeof activeMatchUpdatedAt !== "number") return;
+    const sampleSkew = activeMatchUpdatedAt - Date.now();
+    setServerClockSkewMs((prev) => Math.round(prev * 0.7 + sampleSkew * 0.3));
+  }, [activeMatchUpdatedAt]);
+
   useEffect(() => {
     if (!match) return;
     const id = window.setInterval(() => {
       void refreshMatch(match.id);
-    }, 1500);
+    }, 1000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match?.id]);
@@ -1084,10 +1446,23 @@ export function GameApp() {
     if (match || !activePvpLobby) return;
     const id = window.setInterval(() => {
       void refreshActivePvpLobby(activePvpLobby.id);
-    }, 1500);
+    }, 1000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match?.id, activePvpLobby?.id]);
+
+  useEffect(() => {
+    if (!match) return;
+    if (match.status === "finished") return;
+    const deadlineAt = match.status === "mulligan" ? match.mulliganDeadlineAt : match.turnDeadlineAt;
+    const syncedNow = Date.now() + serverClockSkewMs;
+    const delayMs = Math.max(80, deadlineAt - syncedNow + 40);
+    const id = window.setTimeout(() => {
+      void refreshMatch(match.id);
+    }, delayMs);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [match?.id, match?.status, match?.turn, match?.turnDeadlineAt, match?.mulliganDeadlineAt, serverClockSkewMs]);
 
   useEffect(() => {
     const joinedNow = Boolean(activePvpLobby?.targetUserId);
@@ -1115,6 +1490,19 @@ export function GameApp() {
     const id = window.setTimeout(() => setInfo(""), 3000);
     return () => window.clearTimeout(id);
   }, [info]);
+
+  useEffect(() => {
+    if (eventToast || eventToastQueue.length === 0) return;
+    const [next, ...rest] = eventToastQueue;
+    setEventToast(next ?? "");
+    setEventToastQueue(rest);
+  }, [eventToast, eventToastQueue]);
+
+  useEffect(() => {
+    if (!eventToast) return;
+    const id = window.setTimeout(() => setEventToast(""), 3000);
+    return () => window.clearTimeout(id);
+  }, [eventToast]);
 
   useEffect(() => {
     if (!error) return;
@@ -1166,8 +1554,9 @@ export function GameApp() {
   const myPlayer = mySide && match ? match.players[mySide] : null;
   const enemyPlayer = enemySide && match ? match.players[enemySide] : null;
 
-  const mulliganSeconds = match ? secsLeft(match.mulliganDeadlineAt) : 0;
-  const turnSeconds = match ? secsLeft(match.turnDeadlineAt) : 0;
+  const syncedNowMs = renderNowMs + serverClockSkewMs;
+  const mulliganSeconds = match ? secsLeft(match.mulliganDeadlineAt, syncedNowMs) : 0;
+  const turnSeconds = match ? secsLeft(match.turnDeadlineAt, syncedNowMs) : 0;
   const isMyTurn = Boolean(match && mySide && match.status === "active" && match.activeSide === mySide);
 
   const selectedCardId =
@@ -1209,11 +1598,7 @@ export function GameApp() {
     if (!canUnitCardDropTo(selectedCard, lane, col, occupied)) {
       return false;
     }
-    const flipSurcharge = occupied && selectedCard.traits.includes("flip")
-      ? Math.max(1, Math.ceil(selectedCard.costShares * 0.25))
-      : 0;
-    const totalCost = selectedCard.costShares + flipSurcharge;
-    return myPlayer.shares >= totalCost;
+    return true;
   };
 
   const findRepositionLaneForUnit = (unit: MatchState["units"][string] | null): "front" | "back" | null => {
@@ -1252,6 +1637,7 @@ export function GameApp() {
   const showMulligan = Boolean(match && mySide && match.status === "mulligan" && !match.players[mySide].mulliganDone);
   const selectedFactionInfo = FACTIONS.find((f) => f.id === selectedFaction) ?? FACTIONS[0]!;
   const selectedPvpFactionInfo = FACTIONS.find((f) => f.id === selectedPvpFaction) ?? FACTIONS[0]!;
+  const selectedTutorialFactionInfo = FACTIONS.find((f) => f.id === selectedTutorialFaction) ?? FACTIONS[0]!;
   const activePvpReadyCount = activePvpLobby ? Number(activePvpLobby.inviterReady) + Number(activePvpLobby.targetReady) : 0;
   const activePvpIsInviter = Boolean(activePvpLobby && activePvpLobby.inviterUserId === ctx.userId);
   const activePvpSelfReady = Boolean(activePvpLobby && (activePvpIsInviter ? activePvpLobby.inviterReady : activePvpLobby.targetReady));
@@ -1282,6 +1668,15 @@ export function GameApp() {
         : tutorialState?.coachAnchorKind === "button" && tutorialState.coachButtonId
           ? `[data-coach-button="${tutorialState.coachButtonId}"]`
           : null;
+  const formattedBattleLog = useMemo(() => {
+    if (!match) {
+      return [];
+    }
+    return match.log.map((entry) => formatMatchLogLine(match, entry));
+  }, [match]);
+  const hudTurnLabel = `Turn ${match?.turn ?? 0}`;
+  const hudFlowLabel = enemyThinking ? "Opponent..." : isMyTurn ? "Your turn" : `Side ${match?.activeSide ?? "-"}`;
+  const activeStatusGuide = STATUS_LEGEND.find((status) => status.key === activeStatusGuideKey) || STATUS_LEGEND[0];
 
   useEffect(() => {
     if (!tutorialState?.paused) {
@@ -1373,6 +1768,18 @@ export function GameApp() {
     if (!isMyTurn || !mySide || selectedHandIndex === null || !myPlayer) return;
     const cardId = myPlayer.hand[selectedHandIndex];
     if (!cardId) return;
+    const card = getCardPreview(cardId);
+    if (card.type === "unit") {
+      const occupiedUnitId = myPlayer.board[lane][col];
+      const flipSurcharge = occupiedUnitId && card.traits.includes("flip")
+        ? Math.max(1, Math.ceil(card.costShares * 0.25))
+        : 0;
+      const totalCost = card.costShares + flipSurcharge;
+      if (myPlayer.shares < totalCost) {
+        setError(`Not enough shares to play ${card.name} (${myPlayer.shares}/${totalCost}).`);
+        return;
+      }
+    }
     const action: {
       side: PlayerSide;
       handIndex: number;
@@ -1456,13 +1863,14 @@ export function GameApp() {
       <div className={`app-shell ${match ? "app-shell--battle" : "app-shell--lobby"} wv-${webViewMode} ${platformClass}`}>
         {error ? <div className="status-toast error">{error}</div> : null}
         {info ? <div className="status-toast info">{info}</div> : null}
+        {eventToast ? <div className="status-toast info event">{eventToast}</div> : null}
 
         {!match ? (
           <>
           <section className="lobby-screen">
             <header className="topbar lobby-topbar">
               <h1>Court of Capital</h1>
-              <p>Week {ctx.weekId} · Operator u/{ctx.username || "guest"}</p>
+              <p>Week #{ctx.weekNumber} {ctx.weekId} · Serve the Justice or be the Justice</p>
               <div className="status-row">
                 <span className="badge">Deck 100</span>
                 <span className="badge">Turn 35s</span>
@@ -1665,6 +2073,7 @@ export function GameApp() {
                     <span className="badge">Tutorial #0 Basics</span>
                     <span className="badge">Tutorial #1 Buffs/Debuffs</span>
                     <span className="badge">Tutorial #2 Judge Dependencies</span>
+                    <span className="badge">Sandbox Playground</span>
                   </div>
                   <div className="faction-picker faction-grid">
                     {TUTORIAL_SCENARIOS.map((scenario) => (
@@ -1678,10 +2087,32 @@ export function GameApp() {
                       </button>
                     ))}
                   </div>
-                  <div className="queue-grid">
+                  <div className="panel-head">
+                    <h3>Sandbox Faction</h3>
+                    <p className="subtle">Used only by Clean-up the courtroom.</p>
+                  </div>
+                  <div className="faction-picker faction-grid">
+                    {FACTIONS.map((f) => (
+                      <button
+                        key={`tutorial-sandbox-${f.id}`}
+                        className={`faction-btn faction-btn--rich ${selectedTutorialFaction === f.id ? "active" : ""}`}
+                        onClick={() => setSelectedTutorialFaction(f.id)}
+                      >
+                        <strong>{f.label}</strong>
+                        <span>{f.motto}</span>
+                        <small>{f.tone}</small>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="subtle">Sandbox deck: {selectedTutorialFactionInfo.label} · {selectedTutorialFactionInfo.motto}</p>
+                  <div className="queue-grid tutorial-queue-grid">
                     <button className="action-btn action-btn--primary" disabled={loading} onClick={() => void startTutorial(selectedTutorialScenario)}>
                       <span>Start Selected Tutorial</span>
                       <small>{tutorialScenarioLabel(selectedTutorialScenario)}</small>
+                    </button>
+                    <button className="action-btn action-btn--primary" disabled={loading} onClick={() => void startCleanupSandbox(selectedTutorialFaction)}>
+                      <span>Clean-up the courtroom</span>
+                      <small>Sandbox · 10000 shares · Wozny boss</small>
                     </button>
                   </div>
                 </article>
@@ -1690,10 +2121,10 @@ export function GameApp() {
                   <article className="card-block small resume-block">
                     <h3>Resume Tutorial</h3>
                     <ul className="simple-list">
-                      {tutorialMatches.length === 0 ? <li>No active tutorial match.</li> : null}
+                      {tutorialMatches.length === 0 ? <li>No active tutorial or sandbox match.</li> : null}
                       {tutorialMatches.map((summary) => (
                         <li key={summary.matchId}>
-                          <span>{shortId(summary.matchId)} · {tutorialScenarioLabel(summary.tutorialScenarioId)}</span>
+                          <span>{shortId(summary.matchId)} · {tutorialResumeLabel(summary)}</span>
                           <button className="action-btn" onClick={() => void refreshMatch(summary.matchId, true)}>Open</button>
                         </li>
                       ))}
@@ -1711,7 +2142,7 @@ export function GameApp() {
 
                   <article className="card-block small">
                     <h3>Why This Exists</h3>
-                    <p className="subtle">Tutorial matches are excluded from weekly stats and leaderboard.</p>
+                    <p className="subtle">Tutorial and sandbox matches are excluded from weekly stats and leaderboard.</p>
                     <p className="subtle">You can skip any time and restart from this tab.</p>
                   </article>
                 </div>
@@ -1761,9 +2192,14 @@ export function GameApp() {
           </>
         ) : (
           <section className="battle-shell landscape" ref={battleShellRef}>
-            <div className="battle-screen">
+            <div
+              className="battle-screen"
+              onClick={(event) => {
+                handleGlobalBattleDeselectClick(event.target);
+              }}
+            >
               <div className="battle-hud">
-                <div className="hud-main">
+                <div className="hud-grid">
                   <button
                     className="action-btn secondary hud-back"
                     onClick={() => {
@@ -1788,28 +2224,45 @@ export function GameApp() {
                   >
                     {backArmed ? "Confirm Back" : "Back"}
                   </button>
-                  <span className="badge">{shortId(match.id)}</span>
-                  <span className="badge">{match.status}</span>
-                  <span className={`badge ${turnSeconds <= 5 ? "is-danger" : ""}`}>{turnSeconds}s</span>
-                  <span className="badge">{isMyTurn ? "Your turn" : `Side ${match.activeSide}`}</span>
-                  <span className="badge">Turn {match.turn}</span>
-                </div>
-                <div className="hud-signals">
-                  {armedAttackerUnitId ? <span className="badge attack-armed">Attacker armed</span> : null}
-                  {enemyThinking ? <span className="badge enemy-thinking">Opponent thinking...</span> : null}
-                  {tutorialState ? <span className="badge">Tutorial {tutorialState.stepIndex + 1}/{tutorialState.totalSteps}</span> : null}
-                  {tutorialState && tutorialState.paused ? <span className="badge is-danger">Tip paused</span> : null}
-                  {myPlayer && myPlayer.nakedShortDebt > 0 ? <span className="badge is-danger">Debt {myPlayer.nakedShortDebt}</span> : null}
-                  {typeof myPlayer?.blockedCol === "number" ? <span className="badge is-danger">Iron Curtain: col {myPlayer.blockedCol + 1}</span> : null}
-                  <div className="status-legend" aria-label="Status legend">
-                    {STATUS_LEGEND.map((status) => (
-                      <span
-                        key={`legend-${status.key}`}
-                        className={`status-chip status-${status.key}`}
+                  <div className="status-legend hud-legend-row" aria-label="Status legend primary">
+                    {STATUS_LEGEND.slice(0, 2).map((status) => (
+                      <button
+                        key={`legend-top-${status.key}`}
+                        type="button"
+                        className={`status-chip status-chip-btn status-${status.key}`}
                         title={status.title}
+                        onClick={() => openStatusGuide(status.key)}
                       >
                         {status.short}
-                      </span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="hud-turn-stack" aria-label="Turn info">
+                    <span className="badge">{hudTurnLabel}</span>
+                    <span className="badge">{hudFlowLabel}</span>
+                  </div>
+                  <button
+                    className={`hud-timer-orb ${turnSeconds <= 5 ? "is-danger" : ""}`}
+                    onClick={() => setShowLog(true)}
+                    title="Open full log"
+                  >
+                    <span>{turnSeconds}</span>
+                    <small>s</small>
+                  </button>
+                  <button className="action-btn secondary hud-log" onClick={() => setShowLog(true)}>
+                    Show log
+                  </button>
+                  <div className="status-legend hud-legend-row" aria-label="Status legend secondary">
+                    {STATUS_LEGEND.slice(2).map((status) => (
+                      <button
+                        key={`legend-bottom-${status.key}`}
+                        type="button"
+                        className={`status-chip status-chip-btn status-${status.key}`}
+                        title={status.title}
+                        onClick={() => openStatusGuide(status.key)}
+                      >
+                        {status.short}
+                      </button>
                     ))}
                   </div>
                 </div>
@@ -1863,7 +2316,10 @@ export function GameApp() {
                           data-slot-owner={unitId ? enemySide ?? undefined : undefined}
                           data-slot-name={unitId ? match.units[unitId]?.name ?? undefined : undefined}
                           onClick={() => {
-                            if (!unitId) return;
+                            if (!unitId) {
+                              clearActiveSelection({ clearEnemyInspect: true });
+                              return;
+                            }
                             if (expectsEnemyUnitTarget) {
                               playSelectedOnTarget({ kind: "enemy-unit", unitId });
                               return;
@@ -1878,13 +2334,7 @@ export function GameApp() {
                           }}
                         >
                           {unitId && match.units[unitId] ? (
-                            <div className="slot-body">
-                              <span className="slot-name">{compactName(match.units[unitId]?.name ?? "-", 11)}</span>
-                              <span className="slot-stats">
-                                atk {match.units[unitId]?.attack} · hp {match.units[unitId]?.health}
-                              </span>
-                              <StatusChips unit={match.units[unitId]!} turn={match.turn} />
-                            </div>
+                            <BoardUnitTile unit={match.units[unitId]!} turn={match.turn} />
                           ) : (
                             "-"
                           )}
@@ -1901,7 +2351,10 @@ export function GameApp() {
                           data-slot-owner={unitId ? enemySide ?? undefined : undefined}
                           data-slot-name={unitId ? match.units[unitId]?.name ?? undefined : undefined}
                           onClick={() => {
-                            if (!unitId) return;
+                            if (!unitId) {
+                              clearActiveSelection({ clearEnemyInspect: true });
+                              return;
+                            }
                             if (expectsEnemyUnitTarget) {
                               playSelectedOnTarget({ kind: "enemy-unit", unitId });
                               return;
@@ -1916,13 +2369,7 @@ export function GameApp() {
                           }}
                         >
                           {unitId && match.units[unitId] ? (
-                            <div className="slot-body">
-                              <span className="slot-name">{compactName(match.units[unitId]?.name ?? "-", 11)}</span>
-                              <span className="slot-stats">
-                                atk {match.units[unitId]?.attack} · hp {match.units[unitId]?.health}
-                              </span>
-                              <StatusChips unit={match.units[unitId]!} turn={match.turn} />
-                            </div>
+                            <BoardUnitTile unit={match.units[unitId]!} turn={match.turn} />
                           ) : (
                             "-"
                           )}
@@ -1959,7 +2406,9 @@ export function GameApp() {
                               setEnemyInspectEventId(eventId);
                               setEnemyInspectJudge(false);
                               setEnemyInspectUnitId(null);
+                              return;
                             }
+                            clearActiveSelection({ clearEnemyInspect: true });
                           }}
                         >
                           {col === JUDGE_COL ? (
@@ -1989,7 +2438,9 @@ export function GameApp() {
                               onClick={() => {
                                 if (legalDrop) {
                                   playSelectedTo("front", col);
+                                  return;
                                 }
+                                clearActiveSelection({ clearEnemyInspect: true });
                               }}
                             >
                               +
@@ -2016,9 +2467,6 @@ export function GameApp() {
                               }
                               setAllyInspectCardId(match.units[unitId]?.cardId ?? null);
                               setSelectedHandIndex(null);
-                              setEnemyInspectUnitId(null);
-                              setEnemyInspectEventId(null);
-                              setEnemyInspectJudge(false);
                               setArmedAttackerUnitId((prev) => (prev === unitId ? null : unitId));
                             }}
                             onPointerDown={(e) => {
@@ -2033,13 +2481,7 @@ export function GameApp() {
                               endDragAttack(e, mySide);
                             }}
                           >
-                            <div className="slot-body">
-                              <span className="slot-name">{compactName(match.units[unitId]?.name ?? "-", 11)}</span>
-                              <span className="slot-stats">
-                                atk {match.units[unitId]?.attack} · hp {match.units[unitId]?.health}
-                              </span>
-                              <StatusChips unit={match.units[unitId]!} turn={match.turn} />
-                            </div>
+                            <BoardUnitTile unit={match.units[unitId]!} turn={match.turn} />
                           </button>
                         );
                       })}
@@ -2055,7 +2497,9 @@ export function GameApp() {
                               onClick={() => {
                                 if (legalDrop) {
                                   playSelectedTo("back", col);
+                                  return;
                                 }
+                                clearActiveSelection({ clearEnemyInspect: true });
                               }}
                             >
                               +
@@ -2082,9 +2526,6 @@ export function GameApp() {
                               }
                               setAllyInspectCardId(match.units[unitId]?.cardId ?? null);
                               setSelectedHandIndex(null);
-                              setEnemyInspectUnitId(null);
-                              setEnemyInspectEventId(null);
-                              setEnemyInspectJudge(false);
                               setArmedAttackerUnitId((prev) => (prev === unitId ? null : unitId));
                             }}
                             onPointerDown={(e) => {
@@ -2099,13 +2540,7 @@ export function GameApp() {
                               endDragAttack(e, mySide);
                             }}
                           >
-                            <div className="slot-body">
-                              <span className="slot-name">{compactName(match.units[unitId]?.name ?? "-", 11)}</span>
-                              <span className="slot-stats">
-                                atk {match.units[unitId]?.attack} · hp {match.units[unitId]?.health}
-                              </span>
-                              <StatusChips unit={match.units[unitId]!} turn={match.turn} />
-                            </div>
+                            <BoardUnitTile unit={match.units[unitId]!} turn={match.turn} />
                           </button>
                         );
                       })}
@@ -2164,24 +2599,37 @@ export function GameApp() {
                       {myPlayer.hand.map((cardId, idx) => {
                         const card = getCardPreview(cardId);
                         const displayCost = card.type === "unit" || card.id === "naked_shorting" ? card.costShares : 0;
+                        const onboardArtPath = handOnboardArtPath(card);
                         return (
                           <button
                             key={`${cardId}-${idx}`}
-                            className={`hand-card ${selectedHandIndex === idx ? "selected" : ""} ${centerHandIndex === idx ? "centered" : ""} ${tutorialState?.coachAnchorKind === "hand-card" && tutorialState.coachCardId === cardId ? "tutorial-emphasis" : ""}`}
+                            className={`hand-card has-onboard ${selectedHandIndex === idx ? "selected" : ""} ${centerHandIndex === idx ? "centered" : ""} ${tutorialState?.coachAnchorKind === "hand-card" && tutorialState.coachCardId === cardId ? "tutorial-emphasis" : ""}`}
                             data-hand-index={idx}
                             data-hand-card-id={cardId}
                             onClick={() => onHandCardTap(idx, cardId)}
                           >
-                            <div className="hand-card-top">
-                              <div className="hand-title-wrap">
-                                <strong>{compactName(card.name, 14)}</strong>
-                                <span className="hand-type">{card.type}</span>
+                            <img
+                              key={`${card.id}-onboard`}
+                              className="hand-card-onboard"
+                              src={onboardArtPath}
+                              data-fallback-src={HAND_ONBOARD_FALLBACK_PATH}
+                              alt=""
+                              aria-hidden="true"
+                              loading="lazy"
+                              onError={applyArtFallback}
+                            />
+                            <div className="hand-card-body">
+                              <div className="hand-card-top">
+                                <div className="hand-title-wrap">
+                                  <strong>{compactName(card.name, 14)}</strong>
+                                  <span className="hand-type">{card.type}</span>
+                                </div>
+                                <span className="hand-cost">{displayCost}</span>
                               </div>
-                              <span className="hand-cost">{displayCost}</span>
-                            </div>
-                            <div className="hand-card-meta">
-                              <span className={`faction-chip ${card.faction}`}>{factionLabel(card.faction)}</span>
-                              <span className="combat-chip">{card.attack ?? "-"} / {card.defense ?? "-"}</span>
+                              <div className="hand-card-meta">
+                                <span className={`faction-chip ${card.faction}`}>{factionLabel(card.faction)}</span>
+                                <span className="combat-chip">{card.attack ?? "-"} / {card.defense ?? "-"}</span>
+                              </div>
                             </div>
                           </button>
                         );
@@ -2293,6 +2741,69 @@ export function GameApp() {
                 </div>
               </div>
             ) : null}
+            {showLog ? (
+              <div className="battle-log-overlay" onClick={() => setShowLog(false)}>
+                <article className="battle-log-modal" onClick={(e) => e.stopPropagation()}>
+                  <div className="battle-log-head">
+                    <h3>Match Log</h3>
+                    <div className="status-row">
+                      <span className="badge">{formattedBattleLog.length} entries</span>
+                      <button className="close-btn" onClick={() => setShowLog(false)}>Close</button>
+                    </div>
+                  </div>
+                  <ul className="log-list battle-log-list" aria-label="Full battle log">
+                    {formattedBattleLog.length === 0 ? (
+                      <li className="battle-log-item">
+                        <span className="log-line">No actions logged yet.</span>
+                      </li>
+                    ) : (
+                      formattedBattleLog.map((line, idx) => (
+                        <li key={`battle-log-${idx}`} className="battle-log-item">
+                          <span className="badge">#{idx + 1}</span>
+                          <span className="log-line">{line}</span>
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                </article>
+              </div>
+            ) : null}
+            {showStatusGuide ? (
+              <div className="status-guide-overlay" onClick={() => setShowStatusGuide(false)}>
+                <article className="status-guide-modal" onClick={(event) => event.stopPropagation()}>
+                  <div className="status-guide-head">
+                    <h3>Status Guide</h3>
+                    <button className="close-btn" onClick={() => setShowStatusGuide(false)}>Close</button>
+                  </div>
+                  <div className="status-guide-layout">
+                    <nav className="status-guide-nav" aria-label="Status list">
+                      {STATUS_LEGEND.map((status) => (
+                        <button
+                          key={`status-guide-${status.key}`}
+                          type="button"
+                          className={`status-guide-tab ${activeStatusGuideKey === status.key ? "active" : ""}`}
+                          onClick={() => setActiveStatusGuideKey(status.key)}
+                          title={status.title}
+                        >
+                          <span className={`status-chip status-${status.key}`}>{status.short}</span>
+                        </button>
+                      ))}
+                    </nav>
+                    <article className="status-guide-content">
+                      {activeStatusGuide ? (
+                        <>
+                          <div className="status-guide-title-row">
+                            <span className={`status-chip status-${activeStatusGuide.key}`}>{activeStatusGuide.short}</span>
+                            <h4>{activeStatusGuide.title}</h4>
+                          </div>
+                          <p>{activeStatusGuide.detail ?? activeStatusGuide.title}</p>
+                        </>
+                      ) : null}
+                    </article>
+                  </div>
+                </article>
+              </div>
+            ) : null}
             {isFinished ? (
               <div className="match-end-overlay">
                 <article className="match-end-modal">
@@ -2307,7 +2818,7 @@ export function GameApp() {
                     <button
                       className="action-btn action-btn--primary"
                       onClick={() => {
-                        const nextTab: LobbyTab = match.mode === "pvp" ? "pvp" : match.mode === "tutorial" ? "tutorial" : "quick";
+                        const nextTab: LobbyTab = match.mode === "pvp" ? "pvp" : match.mode === "tutorial" || match.mode === "sandbox" ? "tutorial" : "quick";
                         setLobbyTab(nextTab);
                         setMatch(null);
                         setSelectedHandIndex(null);
@@ -2322,7 +2833,7 @@ export function GameApp() {
                         void loadLobby();
                       }}
                     >
-                      {match.mode === "pvp" ? "Back to PvP Play" : "Back to Lobby"}
+                      {match.mode === "pvp" ? "Back to PvP Play" : match.mode === "sandbox" ? "Back to Tutorial" : "Back to Lobby"}
                     </button>
                   </div>
                 </article>
