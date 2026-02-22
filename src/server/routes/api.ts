@@ -40,10 +40,12 @@ import {
   incrementWeekMatchCount,
   indexPvpLobbyForUser,
   indexMatchForUser,
+  listUnlockedFactionsForUser,
   listUserPvpLobbyIds,
   listPendingInvites,
   listUserMatchIds,
   recordUserOutcome,
+  unlockFactionForUser,
   savePvpLobby,
   saveInvite,
   saveMatch,
@@ -52,7 +54,7 @@ import {
   type RedisLike,
   type LeaderboardBucket,
 } from "../game/storage";
-import { validateWeekOpen } from "../core/post";
+import { resolveWeeklyPost, validateWeekOpen } from "../core/post";
 
 interface ErrorResponse {
   ok: false;
@@ -108,9 +110,11 @@ function toLobbyMatchSummary(match: MatchState): LobbyMatchSummary {
     playerAUserId: match.players.A.userId,
     playerAUsername: match.players.A.username,
     playerAIsBot: match.players.A.isBot,
+    playerAFaction: match.players.A.faction,
     playerBUserId: match.players.B.userId,
     playerBUsername: match.players.B.username,
     playerBIsBot: match.players.B.isBot,
+    playerBFaction: match.players.B.faction,
     tutorialScenarioId: match.tutorial?.scenarioId,
   };
 }
@@ -157,6 +161,14 @@ function requireActor(): { ok: true; userId: string; username: string } | { ok: 
 
 async function ensureActivePost(redisLike: RedisLike) {
   return validateWeekOpen({
+    redis: redisLike,
+    postId: context.postId,
+    postData: context.postData,
+  });
+}
+
+async function resolvePostForLobby(redisLike: RedisLike) {
+  return resolveWeeklyPost({
     redis: redisLike,
     postId: context.postId,
     postData: context.postData,
@@ -288,7 +300,7 @@ api.post("/lobby", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const weekState = await ensureActivePost(storageRedis);
+  const weekState = await resolvePostForLobby(storageRedis);
   if (!weekState.ok) {
     return fail(c, weekState.error, weekState.status);
   }
@@ -296,6 +308,7 @@ api.post("/lobby", async (c) => {
   const pendingInvites = await listPendingInvites(storageRedis, actor.username);
   const userMatchIds = await listUserMatchIds(storageRedis, actor.userId);
   const userPvpLobbyIds = await listUserPvpLobbyIds(storageRedis, actor.userId);
+  const unlockedFactions = await listUnlockedFactionsForUser(storageRedis, actor.userId);
   const now = nowTs();
 
   const quickPlayMatchSummaries: LobbyMatchSummary[] = [];
@@ -303,6 +316,7 @@ api.post("/lobby", async (c) => {
   const tutorialMatchSummaries: LobbyMatchSummary[] = [];
   const pvpLobbies: PvpLobbySummary[] = [];
   const invites: InviteState[] = [];
+  const inferredUnlocked = new Set<FactionId>();
 
   for (const invite of pendingInvites) {
     if (!invite.lobbyId) {
@@ -328,6 +342,12 @@ api.post("/lobby", async (c) => {
     }
 
     let one = raw;
+    if (one.players.A.userId === actor.userId) {
+      inferredUnlocked.add(one.players.A.faction);
+    }
+    if (one.players.B.userId === actor.userId) {
+      inferredUnlocked.add(one.players.B.faction);
+    }
     if (one.mode === "tutorial") {
       const repaired = repairTutorialIfNeeded(one);
       if (repaired.repaired) {
@@ -381,10 +401,18 @@ api.post("/lobby", async (c) => {
     getLeaderboardTop(storageRedis, weekState.weekId, 10, "pve_l3"),
   ]);
 
+  for (const faction of inferredUnlocked) {
+    if (!unlockedFactions.includes(faction)) {
+      unlockedFactions.push(faction);
+      await unlockFactionForUser(storageRedis, actor.userId, faction);
+    }
+  }
+
   return ok(c, {
     snapshot: {
       weekId: weekState.weekId,
       postId: weekState.postId,
+      unlockedFactions: unlockedFactions.length > 0 ? unlockedFactions : ["retail_mob"],
       pendingInvites: invites,
       pvpLobbies,
       quickPlayMatchSummaries,
@@ -439,6 +467,7 @@ api.post("/match/ai", async (c) => {
   const match = createInitialMatch(initInput, now);
   await saveMatch(storageRedis, match);
   await indexMatchForUser(storageRedis, actor.userId, match.id);
+  await unlockFactionForUser(storageRedis, actor.userId, match.players.A.faction);
 
   return ok(c, {
     result: {
@@ -485,6 +514,7 @@ api.post("/tutorial/start", async (c) => {
   const match = setupTutorialMatch(createInitialMatch(initInput, now), scenarioId, now);
   await saveMatch(storageRedis, match);
   await indexMatchForUser(storageRedis, actor.userId, match.id);
+  await unlockFactionForUser(storageRedis, actor.userId, match.players.A.faction);
 
   return ok(c, {
     result: {
@@ -530,6 +560,7 @@ api.post("/tutorial/cleanup/start", async (c) => {
   const match = setupCleanupSandboxMatch(createInitialMatch(initInput, now), now);
   await saveMatch(storageRedis, match);
   await indexMatchForUser(storageRedis, actor.userId, match.id);
+  await unlockFactionForUser(storageRedis, actor.userId, match.players.A.faction);
 
   return ok(c, {
     result: {
@@ -776,6 +807,8 @@ api.post("/pvp/lobby/start", async (c) => {
     await saveMatch(storageRedis, match);
     await indexMatchForUser(storageRedis, lobby.inviterUserId, match.id);
     await indexMatchForUser(storageRedis, lobby.targetUserId, match.id);
+    await unlockFactionForUser(storageRedis, lobby.inviterUserId, match.players.A.faction);
+    await unlockFactionForUser(storageRedis, lobby.targetUserId, match.players.B.faction);
 
     const invite = await getInvite(storageRedis, lobby.inviteId);
     if (invite) {

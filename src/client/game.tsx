@@ -2000,7 +2000,7 @@ export function GameApp() {
                   </div>
                   <div className="inline-input">
                     <input className="text-input" placeholder="username" value={inviteTarget} onChange={(e) => setInviteTarget(e.target.value)} />
-                    <button className="action-btn action-btn--primary" onClick={() => void createInvite()} disabled={loading || inviteTarget.trim().length < 2}>Send</button>
+                    <button className="action-btn action-btn--primary" onClick={() => void createInvite()} disabled={loading || inviteTarget.trim().length < 2}>Send Subpoena</button>
                   </div>
                   <p className="subtle">Selected deck: {selectedPvpFactionInfo.label} · {selectedPvpFactionInfo.motto}</p>
                 </article>

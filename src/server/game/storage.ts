@@ -1,6 +1,6 @@
 import type { RedisClient } from "@devvit/web/server";
 import { PREFIX, calcRatio, leaderboardScore } from "../../shared/game";
-import type { InviteState, MatchState, PvpLobbyState, WeeklyUserStats } from "../../shared/game";
+import type { FactionId, InviteState, MatchState, PvpLobbyState, WeeklyUserStats } from "../../shared/game";
 
 export type LeaderboardBucket = "all" | "pvp" | "pve_l1" | "pve_l2" | "pve_l3";
 
@@ -104,6 +104,10 @@ function keyUserMatches(userId: string): string {
   return `${PREFIX}:user:${userId}:matches`;
 }
 
+function keyUserUnlockedFactions(userId: string): string {
+  return `${PREFIX}:user:${userId}:factions:unlocked`;
+}
+
 function keyInvite(inviteId: string): string {
   return `${PREFIX}:invite:${inviteId}`;
 }
@@ -186,6 +190,23 @@ export async function indexMatchForUser(redis: RedisLike, userId: string, matchI
 
 export async function listUserMatchIds(redis: RedisLike, userId: string): Promise<string[]> {
   return redis.sMembers(keyUserMatches(userId));
+}
+
+export async function unlockFactionForUser(redis: RedisLike, userId: string, faction: FactionId): Promise<void> {
+  await redis.sAdd(keyUserUnlockedFactions(userId), faction);
+}
+
+export async function listUnlockedFactionsForUser(redis: RedisLike, userId: string): Promise<FactionId[]> {
+  const all = await redis.sMembers(keyUserUnlockedFactions(userId));
+  const out = all.filter(
+    (one): one is FactionId =>
+      one === "retail_mob" ||
+      one === "sec" ||
+      one === "market_makers" ||
+      one === "wallstreet" ||
+      one === "short_hedgefund",
+  );
+  return out;
 }
 
 export async function saveInvite(redis: RedisLike, invite: InviteState): Promise<void> {

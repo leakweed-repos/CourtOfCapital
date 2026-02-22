@@ -13,6 +13,19 @@ export interface CreateWeeklyPostContext {
   subredditName: string;
 }
 
+type PostWeekResultOk = {
+  ok: true;
+  weekId: string;
+  postId: string;
+  isActiveWeek: boolean;
+};
+
+type PostWeekResultFail = {
+  ok: false;
+  status: number;
+  error: string;
+};
+
 function readWeekId(postData: unknown): string | null {
   if (!postData || typeof postData !== "object") {
     return null;
@@ -52,6 +65,28 @@ export async function createWeeklyPost(
 export async function validateWeekOpen(
   context: PostContext,
 ): Promise<{ ok: true; weekId: string; postId: string } | { ok: false; status: number; error: string }> {
+  const resolved = await resolveWeeklyPost(context);
+  if (!resolved.ok) {
+    return resolved;
+  }
+
+  if (!resolved.isActiveWeek) {
+    const activeWeekId = await getCurrentWeekId(context.redis);
+    return {
+      ok: false,
+      status: 409,
+      error: `Post week mismatch (${resolved.weekId}) vs active (${activeWeekId ?? "unknown"}).`,
+    };
+  }
+
+  return {
+    ok: true,
+    weekId: resolved.weekId,
+    postId: resolved.postId,
+  };
+}
+
+export async function resolveWeeklyPost(context: PostContext): Promise<PostWeekResultOk | PostWeekResultFail> {
   if (!context.postId) {
     return { ok: false, status: 400, error: "Post context is missing postId." };
   }
@@ -66,16 +101,27 @@ export async function validateWeekOpen(
     return { ok: false, status: 400, error: "Post has no weekId metadata." };
   }
 
-  if (postWeekId !== activeWeekId) {
+  const isActiveWeek = postWeekId === activeWeekId;
+  if (isActiveWeek) {
+    const activePostId = await getWeekPostId(context.redis, activeWeekId);
+    if (activePostId && activePostId !== context.postId) {
+      return {
+        ok: false,
+        status: 409,
+        error: "This weekly post is archived.",
+      };
+    }
+  }
+
+  const registeredPostId = await getWeekPostId(context.redis, postWeekId);
+  if (!registeredPostId) {
     return {
       ok: false,
       status: 409,
-      error: `Post week mismatch (${postWeekId}) vs active (${activeWeekId}).`,
+      error: `Week post mapping is missing for ${postWeekId}.`,
     };
   }
-
-  const activePostId = await getWeekPostId(context.redis, activeWeekId);
-  if (activePostId && activePostId !== context.postId) {
+  if (registeredPostId !== context.postId) {
     return {
       ok: false,
       status: 409,
@@ -85,7 +131,8 @@ export async function validateWeekOpen(
 
   return {
     ok: true,
-    weekId: activeWeekId,
+    weekId: postWeekId,
     postId: context.postId,
+    isActiveWeek,
   };
 }

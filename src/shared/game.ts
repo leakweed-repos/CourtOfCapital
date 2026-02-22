@@ -239,15 +239,18 @@ export interface LobbyMatchSummary {
   playerAUserId: string;
   playerAUsername: string;
   playerAIsBot: boolean;
+  playerAFaction?: FactionId;
   playerBUserId: string;
   playerBUsername: string;
   playerBIsBot: boolean;
+  playerBFaction?: FactionId;
   tutorialScenarioId?: TutorialScenarioId;
 }
 
 export interface LobbySnapshot {
   weekId: string;
   postId: string;
+  unlockedFactions: FactionId[];
   pendingInvites: InviteState[];
   pvpLobbies: PvpLobbySummary[];
   quickPlayMatchSummaries: LobbyMatchSummary[];
