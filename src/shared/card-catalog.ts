@@ -50,6 +50,7 @@ function mkNonUnit(faction: CardFaction, seed: NonUnitSeed): CardDefinition {
 }
 
 const secCombat: UnitSeed[] = [
+  { id: "filing_shield_deputy", name: "Filing Shield Deputy", cost: 108, attack: 2, health: 4, traits: ["taunt", "front_only"], text: "Budget taunt with clipboard courage." },
   { id: "guild_bailiff", name: "Guild Bailiff", cost: 130, attack: 3, health: 5, traits: ["taunt", "front_only"], text: "SEC shield. Taunt frontline." },
   { id: "docket_enforcer", name: "Docket Enforcer", cost: 125, attack: 3, health: 4, traits: ["front_only", "flip"], text: "Slaps fines with a stapler." },
   { id: "subpoena_rider", name: "Subpoena Rider", cost: 118, attack: 3, health: 3, traits: ["reach", "front_only"], text: "Delivers papers at melee speed." },
@@ -63,8 +64,10 @@ const secCombat: UnitSeed[] = [
   { id: "audit_raider", name: "Audit Raider", cost: 121, attack: 4, health: 2, traits: ["any_row"], text: "Ransacks books at dawn." },
   { id: "rulebook_slasher", name: "Rulebook Slasher", cost: 116, attack: 4, health: 2, traits: ["any_row"], text: "Weaponized footnotes." },
   { id: "forensic_raider", name: "Forensic Raider", cost: 127, attack: 3, health: 4, traits: ["reach", "any_row"], text: "Finds ghosts in ledgers." },
+  { id: "injunction_captain", name: "Injunction Captain", cost: 126, attack: 3, health: 4, traits: ["taunt", "prosecutor", "front_only"], text: "Frontline taunt that feeds prosecutor pressure." },
   { id: "probation_hunter", name: "Probation Hunter", cost: 123, attack: 3, health: 4, traits: ["any_row"], text: "Tracks dirty repeat offenders." },
   { id: "freeze_order_knight", name: "Freeze Order Knight", cost: 134, attack: 3, health: 5, traits: ["front_only"], text: "Assets frozen, feelings too." },
+  { id: "federal_receiver", name: "Federal Receiver", cost: 144, attack: 2, health: 8, traits: ["taunt", "front_only"], text: "Confiscates tempo by existing heavily." },
 ];
 
 const secSupport: UnitSeed[] = [
@@ -72,6 +75,7 @@ const secSupport: UnitSeed[] = [
   { id: "civic_auditor", name: "Civic Auditor", cost: 110, attack: 2, health: 4, traits: ["prosecutor", "back_only"], text: "Audit pressure from backline." },
   { id: "whistleblower_intern", name: "Whistleblower Intern", cost: 96, attack: 1, health: 3, traits: ["back_only", "prosecutor"], text: "Anonymous tip machine." },
   { id: "risk_examiner", name: "Risk Examiner", cost: 104, attack: 2, health: 4, traits: ["back_only"], text: "Checks VaR and vibes." },
+  { id: "surveillance_marksman", name: "Surveillance Marksman", cost: 112, attack: 2, health: 3, traits: ["back_only", "ranged", "prosecutor"], text: "Finds spoofers across the tape." },
   { id: "filing_archivist", name: "Filing Archivist", cost: 98, attack: 1, health: 5, traits: ["back_only"], text: "Buffs morale with binders." },
   { id: "market_referee", name: "Market Referee", cost: 112, attack: 2, health: 4, traits: ["back_only", "negotiator", "flip"], text: "Blows whistle on spoofing." },
   { id: "policy_scribe", name: "Policy Scribe", cost: 102, attack: 2, health: 3, traits: ["back_only"], text: "Writes laws no one reads." },
@@ -89,6 +93,7 @@ const secUtilities: NonUnitSeed[] = [
 ];
 
 const marketCombat: UnitSeed[] = [
+  { id: "queue_guard_junior", name: "Queue Guard Junior", cost: 109, attack: 2, health: 4, traits: ["taunt", "front_only"], text: "Cheap depth sponge for thin books." },
   { id: "market_arbiter", name: "Market Arbiter", cost: 115, attack: 2, health: 3, traits: ["ranged", "back_only", "negotiator", "flip"], text: "Negotiator marksman." },
   { id: "spread_sniper", name: "Spread Sniper", cost: 120, attack: 3, health: 3, traits: ["ranged", "back_only"], text: "Precise ranged pressure." },
   { id: "volatility_clerk", name: "Volatility Clerk", cost: 105, attack: 2, health: 4, traits: ["any_row"], text: "Stable anchor under swings." },
@@ -99,15 +104,18 @@ const marketCombat: UnitSeed[] = [
   { id: "darkpool_hunter", name: "Darkpool Hunter", cost: 127, attack: 4, health: 3, traits: ["reach", "front_only"], text: "Lights up hidden liquidity." },
   { id: "match_engine_rider", name: "Match Engine Rider", cost: 129, attack: 4, health: 3, traits: ["front_only"], text: "Clears queues violently." },
   { id: "book_depth_guard", name: "Book Depth Guard", cost: 121, attack: 3, health: 5, traits: ["taunt", "front_only"], text: "Thick book, thick armor." },
+  { id: "halt_auction_warden", name: "Halt Auction Warden", cost: 124, attack: 3, health: 4, traits: ["taunt", "negotiator", "flip", "front_only"], text: "Taunts first, reprices the fight after." },
   { id: "auction_breaker", name: "Auction Breaker", cost: 126, attack: 4, health: 3, traits: ["any_row"], text: "Opens with fireworks." },
   { id: "midpoint_raider", name: "Midpoint Raider", cost: 117, attack: 3, health: 3, traits: ["any_row"], text: "Steals pennies, wins wars." },
-  { id: "gamma_sweeper", name: "Gamma Sweeper", cost: 133, attack: 4, health: 4, traits: ["front_only"], text: "Options pain specialist." },
+  { id: "gamma_sweeper", name: "Gamma Sweeper", cost: 133, attack: 4, health: 4, traits: ["reach", "front_only"], text: "Options pain specialist." },
   { id: "quote_blitz", name: "Quote Blitz", cost: 116, attack: 4, health: 2, traits: ["any_row"], text: "Spoofs your patience." },
   { id: "liquidity_duelist", name: "Liquidity Duelist", cost: 128, attack: 3, health: 4, traits: ["any_row"], text: "1v1 with a price ladder." },
+  { id: "liquidity_bulkhead", name: "Liquidity Bulkhead", cost: 142, attack: 2, health: 8, traits: ["taunt", "front_only"], text: "When spreads widen, this stays." },
 ];
 
 const marketSupport: UnitSeed[] = [
   { id: "settlement_liaison", name: "Settlement Liaison", cost: 108, attack: 2, health: 4, traits: ["negotiator", "back_only"], text: "Negotiates in the Judge lane." },
+  { id: "sweep_router", name: "Sweep Router", cost: 113, attack: 2, health: 3, traits: ["ranged", "back_only"], text: "Routes pressure into hidden liquidity." },
   { id: "clearing_router", name: "Clearing Router", cost: 101, attack: 2, health: 4, traits: ["back_only"], text: "Routes risk to someone else." },
   { id: "imbalance_reader", name: "Imbalance Reader", cost: 103, attack: 2, health: 3, traits: ["back_only"], text: "Sees open-close rituals." },
   { id: "delta_keeper", name: "Delta Keeper", cost: 106, attack: 2, health: 4, traits: ["back_only"], text: "Hedges until it hurts." },
@@ -128,6 +136,7 @@ const marketUtilities: NonUnitSeed[] = [
 ];
 
 const wallstreetCombat: UnitSeed[] = [
+  { id: "compliance_doorman_ws", name: "Compliance Doorman", cost: 110, attack: 2, health: 4, traits: ["taunt", "front_only"], text: "Smiles, stalls, and soaks damage." },
   { id: "clearing_knight", name: "Clearing Knight", cost: 140, attack: 4, health: 4, traits: ["reach", "front_only"], text: "Reach into backline." },
   { id: "floor_mediator", name: "Floor Mediator", cost: 125, attack: 3, health: 4, traits: ["negotiator", "front_only"], text: "Judge envoy in frontline." },
   { id: "blue_chip_raider", name: "Blue Chip Raider", cost: 135, attack: 4, health: 3, traits: ["any_row"], text: "High pressure bruiser." },
@@ -135,13 +144,16 @@ const wallstreetCombat: UnitSeed[] = [
   { id: "roadshow_blade", name: "Roadshow Blade", cost: 122, attack: 4, health: 2, traits: ["rush", "any_row", "flip"], text: "Pitches and stabs." },
   { id: "ipo_ram", name: "IPO Ram", cost: 130, attack: 4, health: 3, traits: ["front_only"], text: "Smashes through listing day." },
   { id: "syndicate_baron", name: "Syndicate Baron", cost: 132, attack: 3, health: 5, traits: ["taunt", "front_only"], text: "Owns half the order book." },
+  { id: "poison_pill_chair", name: "Poison Pill Chair", cost: 128, attack: 3, health: 5, traits: ["taunt", "negotiator", "flip", "front_only"], text: "Taunt plus boardroom leverage package." },
   { id: "bonus_chaser", name: "Bonus Chaser", cost: 116, attack: 4, health: 2, traits: ["any_row"], text: "Compensation-driven warfare." },
   { id: "derivative_spear", name: "Derivative Spear", cost: 127, attack: 4, health: 3, traits: ["reach", "any_row"], text: "Leverage in pointy form." },
   { id: "prime_broker_brawler", name: "Prime Broker Brawler", cost: 134, attack: 3, health: 5, traits: ["front_only"], text: "Margin calls with fists." },
   { id: "credit_raider", name: "Credit Raider", cost: 124, attack: 3, health: 4, traits: ["any_row"], text: "Refinances your HP away." },
   { id: "merger_hunter", name: "Merger Hunter", cost: 129, attack: 4, health: 3, traits: ["any_row"], text: "Always searching for synergies." },
   { id: "balance_sheet_ogre", name: "Balance Sheet Ogre", cost: 136, attack: 3, health: 6, traits: ["taunt", "front_only"], text: "Thick assets, thicker skull." },
+  { id: "capital_adequacy_titan", name: "Capital Adequacy Titan", cost: 146, attack: 2, health: 8, traits: ["taunt", "front_only"], text: "Regulatory capital made flesh." },
   { id: "turnaround_slasher", name: "Turnaround Slasher", cost: 121, attack: 4, health: 3, traits: ["any_row"], text: "Cuts costs and throats." },
+  { id: "dealbook_lancer", name: "Dealbook Lancer", cost: 114, attack: 3, health: 3, traits: ["reach", "any_row"], text: "Finds the soft target in page 417." },
   { id: "staircase_bidder", name: "Staircase Bidder", cost: 123, attack: 3, health: 4, traits: ["any_row"], text: "Walks price up with swagger." },
 ];
 
@@ -167,21 +179,25 @@ const wallstreetUtilities: NonUnitSeed[] = [
 ];
 
 const retailCombat: UnitSeed[] = [
+  { id: "banner_holder", name: "Banner Holder", cost: 106, attack: 2, health: 4, traits: ["taunt", "front_only"], text: "Cheap frontline taunt for the crowd." },
   { id: "retail_rebel", name: "Retail Rebel", cost: 100, attack: 2, health: 4, traits: ["any_row"], text: "Reliable crowd fighter." },
   { id: "diamond_hand_captain", name: "Diamond Hand Captain", cost: 125, attack: 3, health: 5, traits: ["front_only"], text: "Tanky captain for pushes." },
   { id: "meme_berserker", name: "Meme Berserker", cost: 115, attack: 4, health: 2, traits: ["any_row"], text: "Glass-cannon meme charge." },
   { id: "picket_marshal", name: "Picket Marshal", cost: 110, attack: 2, health: 5, traits: ["taunt", "front_only"], text: "Taunt wall for retail line." },
-  { id: "stonk_charger", name: "Stonk Charger", cost: 118, attack: 4, health: 2, traits: ["any_row"], text: "Rocket emojis as fuel." },
+  { id: "diamond_chant_captain", name: "Diamond Chant Captain", cost: 123, attack: 3, health: 4, traits: ["taunt", "flip", "front_only"], text: "Taunts first, swings harder on crowd momentum." },
+  { id: "stonk_charger", name: "Stonk Charger", cost: 163, attack: 4, health: 2, traits: ["any_row", "rush", "reach"], text: "Rocket emojis power-punch." },
   { id: "bagholder_tank", name: "Bagholder Tank", cost: 128, attack: 2, health: 6, traits: ["taunt", "front_only"], text: "Heavy bags, heavy armor." },
   { id: "yolo_striker", name: "YOLO Striker", cost: 119, attack: 4, health: 3, traits: ["rush", "any_row"], text: "No thesis, only conviction." },
   { id: "gamma_ape", name: "Gamma Ape", cost: 131, attack: 4, health: 4, traits: ["front_only"], text: "Powered by OTM calls." },
   { id: "dip_buyer", name: "Dip Buyer", cost: 117, attack: 3, health: 3, traits: ["any_row"], text: "Buys every red candle." },
   { id: "thread_warrior", name: "Thread Warrior", cost: 116, attack: 3, health: 4, traits: ["any_row", "flip"], text: "Wins arguments, then fights." },
   { id: "diamond_pikeman", name: "Diamond Pikeman", cost: 122, attack: 3, health: 4, traits: ["reach", "front_only"], text: "Pierces FUD." },
+  { id: "laser_pointer_ape", name: "Laser Pointer Ape", cost: 113, attack: 2, health: 3, traits: ["ranged", "back_only"], text: "Calls targets for the whole subreddit." },
   { id: "bullhorn_raider", name: "Bullhorn Raider", cost: 121, attack: 4, health: 3, traits: ["any_row"], text: "Loud alpha delivery." },
   { id: "options_gladiator", name: "Options Gladiator", cost: 127, attack: 4, health: 3, traits: ["any_row"], text: "Expires ITM in spirit." },
   { id: "volatile_knuckle", name: "Volatile Knuckle", cost: 114, attack: 4, health: 2, traits: ["any_row"], text: "One candle maniac." },
   { id: "ape_phalanx", name: "Ape Phalanx", cost: 130, attack: 3, health: 5, traits: ["front_only"], text: "Collective stubborn wall." },
+  { id: "diamond_barricade", name: "Diamond Barricade", cost: 142, attack: 2, health: 8, traits: ["taunt", "front_only"], text: "A wall built from conviction and screenshots." },
 ];
 
 const retailSupport: UnitSeed[] = [
@@ -190,7 +206,7 @@ const retailSupport: UnitSeed[] = [
   { id: "discord_moderator", name: "Discord Moderator", cost: 99, attack: 1, health: 5, traits: ["back_only"], text: "Bans bots, spawns morale." },
   { id: "pollster_pro", name: "Pollster Pro", cost: 100, attack: 2, health: 3, traits: ["back_only"], text: "Sentiment as a service." },
   { id: "meme_editor", name: "Meme Editor", cost: 98, attack: 1, health: 4, traits: ["back_only"], text: "Buffs unit with crop and caption." },
-  { id: "data_scraper", name: "Data Scraper", cost: 103, attack: 2, health: 4, traits: ["back_only"], text: "Collects public breadcrumbs." },
+  { id: "data_scraper", name: "Data Scraper", cost: 103, attack: 2, health: 4, traits: ["back_only", "ranged"], text: "Collects public breadcrumbs." },
   { id: "floor_chatter", name: "Floor Chatter", cost: 97, attack: 2, health: 3, traits: ["back_only"], text: "Rumor turbocharger." },
   { id: "petition_writer", name: "Petition Writer", cost: 105, attack: 2, health: 4, traits: ["back_only", "negotiator"], text: "Polite pressure specialist." },
   { id: "community_steward", name: "Community Steward", cost: 106, attack: 2, health: 4, traits: ["back_only"], text: "Keeps retail line together." },
@@ -206,10 +222,12 @@ const retailUtilities: NonUnitSeed[] = [
 ];
 
 const shortCombat: UnitSeed[] = [
+  { id: "compliance_scapegoat", name: "Compliance Scapegoat", cost: 107, attack: 2, health: 4, dirty: 1, traits: ["dirty", "taunt", "front_only"], text: "Disposable taunt with a legal-looking tie." },
   { id: "short_syndicate_runner", name: "Short Syndicate Runner", cost: 105, attack: 3, health: 2, dirty: 1, traits: ["dirty", "any_row"], text: "Dirty runner." },
-  { id: "shadow_broker", name: "Shadow Broker", cost: 115, attack: 3, health: 3, dirty: 1, traits: ["dirty", "back_only"], text: "Backline manipulator." },
+  { id: "shadow_broker", name: "Shadow Broker", cost: 115, attack: 3, health: 3, dirty: 1, traits: ["dirty", "back_only", "ranged"], text: "Backline manipulator." },
   { id: "bribe_courier", name: "Bribe Courier", cost: 100, attack: 2, health: 3, dirty: 2, traits: ["dirty", "any_row"], text: "Judge corruption specialist." },
   { id: "whisper_lobbyist", name: "Whisper Lobbyist", cost: 120, attack: 3, health: 4, dirty: 2, traits: ["dirty", "reach", "any_row"], text: "Reach dirty pressure." },
+  { id: "synthetic_decoy", name: "Synthetic Decoy", cost: 123, attack: 3, health: 4, dirty: 2, traits: ["dirty", "taunt", "flip", "front_only"], text: "Taunts while the real position moves elsewhere." },
   { id: "locate_alchemist", name: "Locate Alchemist", cost: 124, attack: 3, health: 4, dirty: 2, traits: ["dirty", "any_row"], text: "Turns maybe-locates into certainty." },
   { id: "borrowed_shield", name: "Borrowed Shield", cost: 112, attack: 2, health: 5, dirty: 1, traits: ["dirty", "front_only"], text: "Borrow now, explain later." },
   { id: "panic_seller_agent", name: "Panic Seller Agent", cost: 118, attack: 4, health: 2, dirty: 2, traits: ["rush", "dirty", "any_row"], text: "Spreads urgency professionally." },
@@ -219,11 +237,13 @@ const shortCombat: UnitSeed[] = [
   { id: "narrative_assassin", name: "Narrative Assassin", cost: 126, attack: 4, health: 3, dirty: 2, traits: ["dirty", "reach", "any_row"], text: "Kills momentum with one headline." },
   { id: "panic_knight", name: "Panic Knight", cost: 127, attack: 3, health: 4, dirty: 2, traits: ["dirty", "front_only"], text: "Armored in fear." },
   { id: "rehypothecator", name: "Rehypothecator", cost: 129, attack: 3, health: 5, dirty: 3, traits: ["dirty", "front_only"], text: "One share, many owners." },
+  { id: "collateral_bunker", name: "Collateral Bunker", cost: 143, attack: 2, health: 8, dirty: 2, traits: ["dirty", "taunt", "front_only"], text: "Fortified by everyone else's collateral." },
   { id: "ftd_collector", name: "FTD Collector", cost: 122, attack: 4, health: 2, dirty: 3, traits: ["dirty", "any_row"], text: "Delivers never, demands always." },
   { id: "smirk_veteran", name: "Smirk Veteran", cost: 120, attack: 3, health: 4, dirty: 2, traits: ["dirty", "any_row"], text: "Been wrong for years, still smug." },
 ];
 
 const shortSupport: UnitSeed[] = [
+  { id: "hit_piece_sniper", name: "Hit Piece Sniper", cost: 112, attack: 2, health: 3, dirty: 2, traits: ["dirty", "back_only", "ranged"], text: "Backline fear management specialist." },
   { id: "borrow_desk_clerk", name: "Borrow Desk Clerk", cost: 101, attack: 2, health: 4, dirty: 1, traits: ["dirty", "back_only"], text: "Finds lendable shadows." },
   { id: "synthetic_ledger_keeper", name: "Synthetic Ledger Keeper", cost: 104, attack: 2, health: 4, dirty: 1, traits: ["dirty", "back_only"], text: "Adds decimals nobody asked for." },
   { id: "doom_researcher", name: "Doom Researcher", cost: 106, attack: 2, health: 4, dirty: 2, traits: ["dirty", "back_only"], text: "Price target: zero, always." },

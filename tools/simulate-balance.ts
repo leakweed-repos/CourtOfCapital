@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { createInitialMatch, maybeRunBot, tickTimeouts } from "../src/server/game/engine.ts";
 import { stableHash, type FactionId, type MatchState, type MatchWinReason, type PlayerSide } from "../src/shared/game.ts";
 
@@ -6,6 +7,8 @@ const FACTIONS: FactionId[] = ["wallstreet", "sec", "market_makers", "short_hedg
 const GAMES_PER_PAIR = Number(process.env.COC_SIM_GAMES ?? 40);
 const MAX_BOT_STEPS = Number(process.env.COC_SIM_STEPS ?? 220);
 const SWAP_SIDES = process.env.COC_SIM_SWAP !== "0";
+const FORCE_DETERMINISTIC = process.argv.includes("--det") || process.argv.includes("--deterministic");
+const RANDOMIZE_SEEDS = !FORCE_DETERMINISTIC && process.env.COC_SIM_RANDOM_SEEDS !== "0";
 
 type Totals = {
   games: number;
@@ -101,6 +104,14 @@ function runSingle(seed: number, factionA: FactionId, factionB: FactionId): SimR
   return forceFinish(match);
 }
 
+function simSeed(left: FactionId, right: FactionId, game: number, aFaction: FactionId, bFaction: FactionId): number {
+  const base = stableHash(`sim:${left}:${right}:${game}:${aFaction}:${bFaction}`);
+  if (!RANDOMIZE_SEEDS) {
+    return base;
+  }
+  return stableHash(`${base}:rand:${randomInt(0x7fffffff)}`);
+}
+
 function main(): void {
   const factionTotals = new Map<FactionId, Totals>(FACTIONS.map((f) => [f, emptyTotals()]));
   const pairTotals = new Map<string, PairTotals>();
@@ -129,7 +140,7 @@ function main(): void {
         const swapSides = SWAP_SIDES ? game % 2 === 1 : false;
         const aFaction = swapSides ? right : left;
         const bFaction = swapSides ? left : right;
-        const seed = stableHash(`sim:${left}:${right}:${game}:${aFaction}:${bFaction}`);
+        const seed = simSeed(left, right, game, aFaction, bFaction);
         const result = runSingle(seed, aFaction, bFaction);
 
         const aTotals = factionTotals.get(aFaction) as Totals;
@@ -211,6 +222,7 @@ function main(): void {
   console.log(`\nCourt of Capital balance simulation`);
   console.log(`games per unordered faction pair: ${GAMES_PER_PAIR}`);
   console.log(`max bot steps per game: ${MAX_BOT_STEPS}\n`);
+  console.log(`seed mode: ${RANDOMIZE_SEEDS ? "random per game (non-deterministic)" : "deterministic (stableHash only)"}`);
   console.log(
     `side-A wins: ${sideAWins}/${sideGames} (${((sideAWins / Math.max(1, sideGames)) * 100).toFixed(1)}%) | ` +
       `side-B wins: ${sideBWins}/${sideGames} (${((sideBWins / Math.max(1, sideGames)) * 100).toFixed(1)}%) | ` +

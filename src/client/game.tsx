@@ -414,6 +414,14 @@ function formatMatchLogLine(match: MatchState, entry: MatchLogEntry): string {
     return `T${entry.turn} · ${attacker} dealt ${damage} damage to ${sideUserName(match, targetSide)} hero.`;
   }
 
+  const leaderShieldReduced = raw.match(/^(.+?) leader damage reduced by (\d+) \(enemy front row: (\d+)\)\.$/);
+  if (leaderShieldReduced) {
+    const attacker = leaderShieldReduced[1] ?? "Unit";
+    const reduction = leaderShieldReduced[2] ?? "0";
+    const frontCount = leaderShieldReduced[3] ?? "0";
+    return `T${entry.turn} · ${attacker} had hero damage reduced by ${reduction} (enemy front row: ${frontCount}).`;
+  }
+
   const dealtUnit = raw.match(/^(.+?) dealt (\d+) to (.+?)\.$/);
   if (dealtUnit) {
     const attacker = dealtUnit[1] ?? "Unit";
@@ -461,6 +469,7 @@ function isHighSignalToastLine(line: string): boolean {
 
   const highSignalPatterns: RegExp[] = [
     /\bdealt \d+ damage\b/,
+    /\bleader damage reduced\b/,
     /\bcountered\b/,
     /\bblocked 1 shield layer\b/,
     /\bshield\b/,
@@ -2941,7 +2950,6 @@ createRoot(rootEl).render(
     <GameApp />
   </StrictMode>,
 );
-
 
 
 

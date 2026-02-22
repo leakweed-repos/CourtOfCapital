@@ -240,6 +240,7 @@ export function Splash() {
                 <li><span>Lane map</span><strong>2x5 your side, middle events, 2x5 enemy side</strong></li>
                 <li><span>Turn rhythm</span><strong>Play, cast, attack, then beat the timer</strong></li>
                 <li><span>Win line</span><strong>Drop enemy leader HP to 0 before they do the same</strong></li>
+                <li><span>Leader shield</span><strong>Enemy front row reduces leader damage (1 unit: -1, 2 units: -2, 3+ blocks)</strong></li>
               </ul>
             </article>
           </section>
@@ -256,6 +257,7 @@ export function Splash() {
                 <li><span>Green Judge slot</span><strong>Legal pressure, petitions, cleaner control tools</strong></li>
                 <li><span>Blue Judge slot</span><strong>Bribes, dirty leverage, debuff pressure</strong></li>
                 <li><span>Combo moment</span><strong>Own Green + Blue active means stronger court swing plays</strong></li>
+                <li><span>Backline rule</span><strong>Reach/Ranged is still required to hit enemy back row (and most back-row leader attacks)</strong></li>
               </ul>
             </article>
             <article className="sb-about-card">

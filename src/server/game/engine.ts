@@ -1272,15 +1272,28 @@ function applyFactionCombatHooks(
   }
 }
 
-function hasEnemyFrontTaunt(match: MatchState, attackerSide: PlayerSide): boolean {
+type LeaderFrontShield = {
+  frontCount: number;
+  blocked: boolean;
+  damagePenalty: number;
+};
+
+function leaderFrontShield(match: MatchState, attackerSide: PlayerSide): LeaderFrontShield {
   const enemy = opponentOf(attackerSide);
-  for (const unitId of listSideUnitIds(match, enemy, "front")) {
-    const unit = match.units[unitId];
-    if (unit && unit.traits.includes("taunt")) {
-      return true;
-    }
+  const frontCount = listSideUnitIds(match, enemy, "front").length;
+  if (frontCount >= 3) {
+    return {
+      frontCount,
+      blocked: true,
+      damagePenalty: 0,
+    };
   }
-  return false;
+
+  return {
+    frontCount,
+    blocked: false,
+    damagePenalty: frontCount <= 0 ? 0 : frontCount === 1 ? 1 : 2,
+  };
 }
 
 function canReachBackline(attacker: UnitState): boolean {
@@ -2805,14 +2818,41 @@ export function attack(match: MatchState, input: AttackInput): MatchActionResult
   }
 
   if (input.target.kind === "leader") {
+    const enemyHasFrontTaunt = enemyTauntFront.length > 0;
+
     if (isBlueJudgeUnit(attacker)) {
-      return { ok: false, error: "Blue judge slot can only attack enemy green judge slot.", match };
+      if (enemyHasFrontTaunt) {
+        return { ok: false, error: "Blue judge slot cannot attack leader while enemy front-row taunt is active.", match };
+      }
+      dealDamageToLeader(match, enemy, damage);
+      pushLog(match, `${attacker.name} hit leader ${enemy} for ${damage}.`);
+    } else {
+      if (enemyHasFrontTaunt) {
+        return { ok: false, error: "Taunt in enemy front row must be attacked first.", match };
+      }
+      if (attacker.lane === "back" && !canReachBackline(attacker)) {
+        return { ok: false, error: "Back-row unit needs reach or ranged to attack leader.", match };
+      }
+
+      const shield = leaderFrontShield(match, input.side);
+      if (shield.blocked) {
+        return {
+          ok: false,
+          error: `Enemy front row shields the leader (${shield.frontCount} units). Clear the line first.`,
+          match,
+        };
+      }
+
+      const leaderDamage = Math.max(0, damage - shield.damagePenalty);
+      if (shield.damagePenalty > 0) {
+        pushLog(
+          match,
+          `${attacker.name} leader damage reduced by ${shield.damagePenalty} (enemy front row: ${shield.frontCount}).`,
+        );
+      }
+      dealDamageToLeader(match, enemy, leaderDamage);
+      pushLog(match, `${attacker.name} hit leader ${enemy} for ${leaderDamage}.`);
     }
-    if (hasEnemyFrontTaunt(match, input.side)) {
-      return { ok: false, error: "Taunt in enemy front row must be attacked first.", match };
-    }
-    dealDamageToLeader(match, enemy, damage);
-    pushLog(match, `${attacker.name} hit leader ${enemy} for ${damage}.`);
   }
 
   if (input.target.kind === "unit") {

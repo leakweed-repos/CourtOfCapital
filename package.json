@@ -13,7 +13,10 @@
     "login": "devvit login",
     "prettier": "prettier --write .",
     "sim:balance": "tsx tools/simulate-balance.ts",
-    "test": "npm run sim:balance",
+    "sim:balance:det": "tsx tools/simulate-balance.ts --deterministic",
+    "test:leader-rules": "tsx tools/test-leader-rules.ts",
+    "test": "npm run test:leader-rules && npm run sim:balance",
+    "dev:det": "npm run sim:balance:det",
     "type-check": "tsc --build"
   },
   "engines": {
