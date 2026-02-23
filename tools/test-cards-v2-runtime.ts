@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { attack, createInitialMatch, endTurn, playCard } from "../src/server/game/engine.ts";
+import { runAiUntilHumanTurn } from "../src/server/game/ai.ts";
 import { JUDGE_COL, type CardTrait, type Lane, type MatchState, type PlayerSide, type UnitState } from "../src/shared/game.ts";
 import { getCatalogCard } from "../src/shared/card-catalog.ts";
 
@@ -159,10 +160,113 @@ function testCombatV2RuntimeForStonkChargerWithoutSignatureFallback(): void {
   assert.equal(hasLog(match, "Stonk Charger signature:"), false, "V2 card should not use legacy fallback signature in combat");
 }
 
+function testOnSummonV2RuntimeForNeutralForensicJournalist(): void {
+  const match = makeActiveMatch("A");
+  match.players.A.hand = ["forensic_journalist"];
+  match.players.A.shares = 999;
+
+  const result = playCard(match, {
+    side: "A",
+    handIndex: 0,
+    lane: "front",
+    col: 0,
+  });
+
+  assert.equal(result.ok, true, "forensic_journalist should be playable");
+  const unitId = match.players.A.board.front[0];
+  assert.equal(typeof unitId, "string", "forensic_journalist should be placed on board");
+  const unit = unitId ? match.units[unitId] : undefined;
+  assert.ok(unit, "forensic_journalist unit state should exist");
+  assert.equal(unit?.shieldCharges ?? 0, 3, "forensic_journalist V2 on_summon should grant +3 shield");
+  assert.equal(hasLog(match, "Forensic Journalist [V2]:"), true, "expected V2 runtime log for forensic_journalist on_summon");
+}
+
+function testBotPrioritizesBlueJudgeSlotForCorruptSpecialist(): void {
+  const match = createInitialMatch(
+    {
+      weekId: "phase3-ai-week",
+      postId: "phase3-ai-post",
+      mode: "pvp",
+      playerA: {
+        userId: "bot-a",
+        username: "botA",
+        faction: "short_hedgefund",
+        isBot: true,
+        botLevel: 3,
+      },
+      playerB: {
+        userId: "human-b",
+        username: "humanB",
+        faction: "retail_mob",
+        isBot: false,
+      },
+      seed: 424242,
+    },
+    1_700_000_000_000,
+  );
+  match.status = "active";
+  match.turn = 1;
+  match.activeSide = "A";
+  match.turnDeadlineAt = Number.MAX_SAFE_INTEGER;
+  match.players.A.mulliganDone = true;
+  match.players.B.mulliganDone = true;
+  match.players.A.hand = ["borrowed_shield"];
+  match.players.A.shares = 999;
+  match.players.B.hand = [];
+
+  runAiUntilHumanTurn(match);
+
+  const blueJudgeUnitId = match.players.A.board.back[JUDGE_COL];
+  assert.equal(typeof blueJudgeUnitId, "string", "AI should prioritize blue Judge slot for corrupt specialist unit");
+  assert.equal(blueJudgeUnitId ? match.units[blueJudgeUnitId]?.cardId : undefined, "borrowed_shield");
+}
+
+function testBotCanPlayMultipleCardsInOneTurn(): void {
+  const match = createInitialMatch(
+    {
+      weekId: "phase3-ai-multiplay-week",
+      postId: "phase3-ai-multiplay-post",
+      mode: "pvp",
+      playerA: {
+        userId: "bot-a",
+        username: "botA",
+        faction: "short_hedgefund",
+        isBot: true,
+        botLevel: 3,
+      },
+      playerB: {
+        userId: "human-b",
+        username: "humanB",
+        faction: "retail_mob",
+        isBot: false,
+      },
+      seed: 777777,
+    },
+    1_700_000_000_000,
+  );
+  match.status = "active";
+  match.turn = 1;
+  match.activeSide = "A";
+  match.turnDeadlineAt = Number.MAX_SAFE_INTEGER;
+  match.players.A.mulliganDone = true;
+  match.players.B.mulliganDone = true;
+  match.players.A.hand = ["borrowed_shield", "bribe_courier"];
+  match.players.A.shares = 999;
+  match.players.B.hand = [];
+
+  runAiUntilHumanTurn(match);
+
+  const aUnits = Object.values(match.units).filter((u) => u.owner === "A");
+  assert.equal(aUnits.length >= 2, true, "Higher-level AI should be able to deploy more than one card in a turn when budget and slots allow");
+}
+
 function main(): void {
   testOnSummonV2RuntimeForComplianceClerk();
   testTurnStartV2RuntimeForPicketMarshalWithoutSignatureFallback();
   testCombatV2RuntimeForStonkChargerWithoutSignatureFallback();
+  testOnSummonV2RuntimeForNeutralForensicJournalist();
+  testBotPrioritizesBlueJudgeSlotForCorruptSpecialist();
+  testBotCanPlayMultipleCardsInOneTurn();
   console.log("V2 runtime trigger regression tests passed.");
 }
 

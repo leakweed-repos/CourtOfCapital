@@ -88,10 +88,6 @@ type AttackTarget =
   | { kind: "unit"; unitId: string }
   | { kind: "event"; eventUnitId: string };
 
-type RemoteAction =
-  | { kind: "play" }
-  | { kind: "attack"; attackerName: string; target: { kind: "leader" } | { kind: "unit"; name: string } | { kind: "event"; name: string } };
-
 function readContext(): UiContext {
   const clientName = context.client?.name;
   return {
@@ -605,15 +601,15 @@ export function GameApp() {
   const [centerHandIndex, setCenterHandIndex] = useState<number>(0);
   const [nakedLeverage, setNakedLeverage] = useState<2 | 3 | 4 | 5>(2);
   const [backArmed, setBackArmed] = useState(false);
-  const [enemyThinking, setEnemyThinking] = useState(false);
   const [allyInspectCardId, setAllyInspectCardId] = useState<string | null>(null);
   const [enemyInspectUnitId, setEnemyInspectUnitId] = useState<string | null>(null);
   const [enemyInspectEventId, setEnemyInspectEventId] = useState<string | null>(null);
   const [enemyInspectJudge, setEnemyInspectJudge] = useState(false);
   const [coachmarkPosition, setCoachmarkPosition] = useState<CoachmarkPosition | null>(null);
-  const remoteAnimatingRef = useRef(false);
+  const actionRequestInFlightRef = useRef(false);
   const attackInputCooldownUntilRef = useRef(0);
   const pvpJoinedPrevRef = useRef(false);
+  const activePvpLobbyRef = useRef<PvpLobbyState | null>(null);
   const matchRef = useRef<MatchState | null>(null);
   const matchRequestSeqRef = useRef(0);
   const matchAppliedRequestSeqRef = useRef(0);
@@ -676,13 +672,19 @@ export function GameApp() {
   }
 
   async function refreshMatch(matchId: string, allowSwitch = false): Promise<void> {
-    if (remoteAnimatingRef.current) {
+    if (actionRequestInFlightRef.current) {
       return;
     }
     matchRequestSeqRef.current += 1;
     const requestSeq = matchRequestSeqRef.current;
     const response = await postJson(API_ROUTES.matchGet, { matchId });
+    if (actionRequestInFlightRef.current) {
+      return;
+    }
     if (!response.ok) {
+      if (response.error.includes("Request conflict: state is being updated")) {
+        return;
+      }
       setError(response.error);
       return;
     }
@@ -700,41 +702,6 @@ export function GameApp() {
     ) {
       return;
     }
-    const prevMatch = currentMatch;
-
-    if (prevMatch && prevMatch.updatedAt !== nextMatch.updatedAt) {
-      const myPrevSide = sideForUser(prevMatch, ctx.userId);
-      if (myPrevSide) {
-        const wasEnemyTurn = prevMatch.status === "active" && prevMatch.activeSide === enemyOf(myPrevSide);
-        const nowMyTurn = nextMatch.status === "active" && nextMatch.activeSide === myPrevSide;
-        const remoteActions = wasEnemyTurn ? deriveRemoteActions(prevMatch, nextMatch, myPrevSide) : [];
-        if (nowMyTurn && remoteActions.length > 0) {
-          remoteAnimatingRef.current = true;
-          setEnemyThinking(true);
-          try {
-            await playRemoteSequence(remoteActions, myPrevSide);
-          } finally {
-            setEnemyThinking(false);
-            remoteAnimatingRef.current = false;
-          }
-        }
-      }
-    }
-
-    const latestCurrentMatch = matchRef.current;
-    if (
-      shouldDiscardMatchResponse({
-        requestSeq,
-        latestAppliedRequestSeq: matchAppliedRequestSeqRef.current,
-        allowSwitch,
-        requestedMatchId: matchId,
-        currentMatch: latestCurrentMatch,
-        incomingMatch: nextMatch,
-      })
-    ) {
-      return;
-    }
-
     matchAppliedRequestSeqRef.current = requestSeq;
     matchRef.current = nextMatch;
     setMatch(nextMatch);
@@ -835,6 +802,9 @@ export function GameApp() {
     setLoading(false);
 
     if (!response.ok) {
+      if (response.error.includes("Request conflict: state is being updated")) {
+        return;
+      }
       setError(response.error);
       return;
     }
@@ -876,6 +846,9 @@ export function GameApp() {
     const response = await postJson<{ lobbyId: string }, PvpLobbyResponse>(API_ROUTES.pvpLobbyGet, { lobbyId });
     if (!response.ok) {
       setError(response.error);
+      if (response.error === "Lobby not found.") {
+        await loadLobby();
+      }
       return;
     }
     setActivePvpLobby(response.data.lobby);
@@ -883,7 +856,11 @@ export function GameApp() {
 
   async function refreshActivePvpLobby(lobbyId: string): Promise<void> {
     const response = await postJson<{ lobbyId: string }, PvpLobbyResponse>(API_ROUTES.pvpLobbyGet, { lobbyId });
+    if (activePvpLobbyRef.current?.id !== lobbyId) {
+      return;
+    }
     if (!response.ok) {
+      activePvpLobbyRef.current = null;
       setActivePvpLobby(null);
       setError(response.error);
       return;
@@ -891,12 +868,14 @@ export function GameApp() {
 
     const nextLobby = response.data.lobby;
     if (nextLobby.matchId) {
+      activePvpLobbyRef.current = null;
       setActivePvpLobby(null);
       await refreshMatch(nextLobby.matchId, true);
       await loadLobby();
       return;
     }
 
+    activePvpLobbyRef.current = nextLobby;
     setActivePvpLobby(nextLobby);
   }
 
@@ -920,6 +899,7 @@ export function GameApp() {
     }
 
     if (response.data.result?.ok && response.data.result.match) {
+      activePvpLobbyRef.current = null;
       setActivePvpLobby(null);
       matchRef.current = response.data.result.match;
       setMatch(response.data.result.match);
@@ -950,6 +930,7 @@ export function GameApp() {
       return;
     }
 
+    activePvpLobbyRef.current = null;
     setActivePvpLobby(null);
     setInfo("Battle dismantled.");
     await loadLobby();
@@ -957,6 +938,8 @@ export function GameApp() {
 
   async function runAction(route: string, action: Record<string, unknown>, options?: { clearArmed?: boolean }): Promise<void> {
     if (!match) return;
+    actionRequestInFlightRef.current = true;
+    try {
     matchRequestSeqRef.current += 1;
     const requestSeq = matchRequestSeqRef.current;
 
@@ -1006,11 +989,27 @@ export function GameApp() {
       return;
     }
     setError("");
+    if (
+      shouldDiscardMatchResponse({
+        requestSeq,
+        latestAppliedRequestSeq: matchAppliedRequestSeqRef.current,
+        allowSwitch: true,
+        requestedMatchId: match.id,
+        currentMatch: matchRef.current,
+        incomingMatch: nextMatch,
+      })
+    ) {
+      return;
+    }
+
     matchAppliedRequestSeqRef.current = requestSeq;
     matchRef.current = nextMatch;
     setMatch(nextMatch);
     if (options?.clearArmed !== false) {
       setArmedAttackerUnitId(null);
+    }
+    } finally {
+      actionRequestInFlightRef.current = false;
     }
   }
 
@@ -1078,158 +1077,6 @@ export function GameApp() {
     }
 
     return { attacker: attackerEl, target: targetEl };
-  }
-
-  function findUnitElementByName(side: PlayerSide, name: string): Element | null {
-    const unitButtons = Array.from(document.querySelectorAll("[data-slot-owner][data-slot-name]"));
-    for (const el of unitButtons) {
-      const owner = (el as HTMLElement).dataset.slotOwner;
-      const slotName = (el as HTMLElement).dataset.slotName;
-      if (owner === side && slotName === name) {
-        return el;
-      }
-    }
-    return null;
-  }
-
-  function findLeaderElement(side: "enemy" | "you"): Element | null {
-    return document.querySelector(`[data-leader-target="${side}"]`);
-  }
-
-  async function playRemoteFlyer(fromEl: Element, toEl: Element): Promise<void> {
-    const start = elementCenter(fromEl);
-    const end = elementCenter(toEl);
-    const flyer = document.createElement("div");
-    flyer.className = "attack-flyer enemy";
-    flyer.textContent = "✦";
-    flyer.style.transform = `translate(${start.x - 14}px, ${start.y - 14}px) scale(0.9)`;
-    document.body.appendChild(flyer);
-
-    const out = flyer.animate(
-      [
-        { transform: `translate(${start.x - 14}px, ${start.y - 14}px) scale(0.9)` },
-        { transform: `translate(${end.x - 14}px, ${end.y - 14}px) scale(1.05)` },
-      ],
-      { duration: 230, easing: "cubic-bezier(0.22, 0.85, 0.25, 1)", fill: "forwards" },
-    );
-    await out.finished.catch(() => undefined);
-    toEl.classList.add("hit-flash");
-    window.setTimeout(() => toEl.classList.remove("hit-flash"), 180);
-    flyer.remove();
-  }
-
-  function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => window.setTimeout(resolve, ms));
-  }
-
-  function deriveRemoteActions(prevMatch: MatchState, nextMatch: MatchState, mySide: PlayerSide): RemoteAction[] {
-    const enemySide = enemyOf(mySide);
-    const startIdx = prevMatch.log.length;
-    const entries = nextMatch.log.slice(startIdx);
-    const actions: RemoteAction[] = [];
-    const enemyNames = new Set<string>();
-
-    for (const unit of Object.values(prevMatch.units)) {
-      if (unit.owner === enemySide) {
-        enemyNames.add(unit.name);
-      }
-    }
-    for (const unit of Object.values(nextMatch.units)) {
-      if (unit.owner === enemySide) {
-        enemyNames.add(unit.name);
-      }
-    }
-
-    for (const entry of entries) {
-      const text = entry.text;
-      if (text.startsWith(`${enemySide} played `) || text.startsWith(`${enemySide} issued `) || text.startsWith(`${enemySide} executed `)) {
-        actions.push({ kind: "play" });
-        continue;
-      }
-
-      const hitLeader = text.match(/^(.+?) hit leader /);
-      if (hitLeader) {
-        const attackerName = hitLeader[1] ?? "";
-        if (enemyNames.has(attackerName)) {
-          actions.push({ kind: "attack", attackerName, target: { kind: "leader" } });
-        }
-        continue;
-      }
-
-      const dealtUnit = text.match(/^(.+?) dealt \d+ to (.+?)\./);
-      if (dealtUnit) {
-        const attackerName = dealtUnit[1] ?? "";
-        if (!enemyNames.has(attackerName)) {
-          continue;
-        }
-        actions.push({
-          kind: "attack",
-          attackerName,
-          target: { kind: "unit", name: dealtUnit[2] ?? "" },
-        });
-        continue;
-      }
-
-      const hitEvent = text.match(/^(.+?) hit event (.+?) for /);
-      if (hitEvent) {
-        const attackerName = hitEvent[1] ?? "";
-        if (!enemyNames.has(attackerName)) {
-          continue;
-        }
-        actions.push({
-          kind: "attack",
-          attackerName,
-          target: { kind: "event", name: hitEvent[2] ?? "" },
-        });
-      }
-    }
-
-    return actions;
-  }
-
-  async function playRemoteSequence(
-    actions: RemoteAction[],
-    mySide: PlayerSide,
-  ): Promise<void> {
-    const enemySide = enemyOf(mySide);
-    const enemyLeader = findLeaderElement("enemy");
-    const myLeader = findLeaderElement("you");
-
-    for (const action of actions) {
-      if (action.kind === "play") {
-        if (enemyLeader) {
-          enemyLeader.classList.add("bot-think");
-          await sleep(240);
-          enemyLeader.classList.remove("bot-think");
-        } else {
-          await sleep(220);
-        }
-        continue;
-      }
-
-      const attackerEl =
-        findUnitElementByName(enemySide, action.attackerName) ??
-        enemyLeader;
-
-      let targetEl: Element | null = null;
-      if (action.target.kind === "leader") {
-        targetEl = myLeader;
-      } else if (action.target.kind === "unit") {
-        targetEl = findUnitElementByName(mySide, action.target.name);
-      } else {
-        targetEl = document.querySelector("[data-event-id]");
-      }
-
-      if (attackerEl && targetEl) {
-        await playRemoteFlyer(attackerEl, targetEl);
-      } else {
-        await sleep(180);
-      }
-      await sleep(90);
-    }
-
-    // ensure a short beat before state swap to sell the illusion
-    await sleep(140);
   }
 
   async function playAttackAnimation(attackerUnitId: string, target: AttackTarget): Promise<void> {
@@ -1393,6 +1240,10 @@ export function GameApp() {
   useEffect(() => {
     matchRef.current = match;
   }, [match]);
+
+  useEffect(() => {
+    activePvpLobbyRef.current = activePvpLobby;
+  }, [activePvpLobby]);
 
   useEffect(() => {
     if (!match) {
@@ -1695,7 +1546,7 @@ export function GameApp() {
     return match.log.map((entry) => formatMatchLogLine(match, entry));
   }, [match]);
   const hudTurnLabel = `Turn ${match?.turn ?? 0}`;
-  const hudFlowLabel = enemyThinking ? "Opponent..." : isMyTurn ? "Your turn" : `Side ${match?.activeSide ?? "-"}`;
+  const hudFlowLabel = isMyTurn ? "Your turn" : `Side ${match?.activeSide ?? "-"}`;
   const activeStatusGuide = STATUS_LEGEND.find((status) => status.key === activeStatusGuideKey) || STATUS_LEGEND[0];
 
   useEffect(() => {

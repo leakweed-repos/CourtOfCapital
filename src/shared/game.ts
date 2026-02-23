@@ -151,6 +151,9 @@ export interface MatchState {
   turn: number;
   activeSide: PlayerSide;
   turnDeadlineAt: number;
+  botThinkUntilAt?: number;
+  botThinkSide?: PlayerSide;
+  botThinkTurn?: number;
   turnSecondsBySide?: {
     A?: number;
     B?: number;

@@ -38,6 +38,7 @@ import {
 } from "./models";
 import { getCardEffectDescriptor, type CardTargetRule } from "../../shared/card-effects";
 import { SANDBOX_CLEANUP_CARD_IDS } from "../../shared/card-catalog";
+import { getCardV2ById, type CardActionDef, type CardTriggerDef } from "../../shared/cards/index";
 import {
   getJudgeSpecialistProfile,
   type JudgeBlueRider,
@@ -859,7 +860,11 @@ function applyFactionOnSummon(match: MatchState, side: PlayerSide, unit: UnitSta
       pushLog(match, `Blue-slot whisper campaign: enemy judge hostility +1.`);
     }
     applyUnitOnSummonSkill(match, side, unit);
+    return;
   }
+
+  // Neutral units still need their explicit/V2 on-summon effects.
+  applyUnitOnSummonSkill(match, side, unit);
 }
 
 function applyUnitTurnStartSkills(match: MatchState, side: PlayerSide): void {
@@ -2799,9 +2804,21 @@ export function attack(match: MatchState, input: AttackInput): MatchActionResult
     return { ok: false, error: "This unit cannot attack this turn.", match };
   }
 
+  const selfCurtainBreakTarget =
+    input.target.kind === "event"
+      ? match.eventUnits[input.target.eventUnitId]
+      : undefined;
+  const canBreakOwnCurtainDespiteBlock =
+    selfCurtainBreakTarget?.kind === "iron_curtain" && selfCurtainBreakTarget.ownerSide === input.side;
+
   const blockedCol = match.players[input.side].blockedCol;
   const blockedLane = match.players[input.side].blockedLane;
-  if (typeof blockedCol === "number" && attacker.col === blockedCol && (!blockedLane || attacker.lane === blockedLane)) {
+  if (
+    !canBreakOwnCurtainDespiteBlock &&
+    typeof blockedCol === "number" &&
+    attacker.col === blockedCol &&
+    (!blockedLane || attacker.lane === blockedLane)
+  ) {
     if (blockedLane) {
       return {
         ok: false,
@@ -3080,17 +3097,70 @@ function pickHighestAttackUnitId(match: MatchState, unitIds: string[]): string |
   return bestId;
 }
 
-function pickPriorityEnemyUnitId(match: MatchState, side: PlayerSide): string | undefined {
-  const tauntFront = listSideUnitIds(match, side, "front").filter((id) => match.units[id]?.traits.includes("taunt"));
+function botEffectiveUnitDurability(unit: UnitState): number {
+  return unit.health + (unit.shieldCharges ?? 0);
+}
+
+function botPickAllySupportTargetId(match: MatchState, side: PlayerSide): string | undefined {
+  const allies = listSideUnitIds(match, side);
+  if (allies.length === 0) {
+    return undefined;
+  }
+
+  const damaged = allies.filter((id) => {
+    const unit = match.units[id];
+    return Boolean(unit) && (unit as UnitState).health < (unit as UnitState).maxHealth;
+  });
+  const damagedPick = pickLowestHealthUnitId(match, damaged);
+  if (damagedPick) {
+    return damagedPick;
+  }
+
+  const tauntAllies = allies.filter((id) => match.units[id]?.traits.includes("taunt"));
+  if (tauntAllies.length > 0) {
+    return pickLowestHealthUnitId(match, tauntAllies) ?? tauntAllies[0];
+  }
+
+  const judgeSpecialists = allies.filter((id) => {
+    const unit = match.units[id];
+    return Boolean(unit) && isJudgeSpecialistCard((unit as UnitState).cardId);
+  });
+  if (judgeSpecialists.length > 0) {
+    return pickHighestAttackUnitId(match, judgeSpecialists) ?? judgeSpecialists[0];
+  }
+
+  return pickHighestAttackUnitId(match, allies) ?? allies[0];
+}
+
+function botPickPriorityEnemyForSpell(match: MatchState, side: PlayerSide): string | undefined {
+  const enemy = opponentOf(side);
+  const enemyUnits = listSideUnitIds(match, enemy);
+  if (enemyUnits.length === 0) {
+    return undefined;
+  }
+
+  const tauntFront = listSideUnitIds(match, enemy, "front").filter((id) => match.units[id]?.traits.includes("taunt"));
   if (tauntFront.length > 0) {
-    return tauntFront[0];
+    return pickHighestAttackUnitId(match, tauntFront) ?? tauntFront[0];
   }
-  const front = listSideUnitIds(match, side, "front");
-  if (front.length > 0) {
-    return front[0];
+
+  const judgeSpecialists = enemyUnits.filter((id) => {
+    const unit = match.units[id];
+    return Boolean(unit) && isJudgeSpecialistCard((unit as UnitState).cardId);
+  });
+  if (judgeSpecialists.length > 0) {
+    return pickHighestAttackUnitId(match, judgeSpecialists) ?? judgeSpecialists[0];
   }
-  const any = listSideUnitIds(match, side);
-  return any[0];
+
+  const rangedBackliners = enemyUnits.filter((id) => {
+    const unit = match.units[id];
+    return Boolean(unit) && (unit as UnitState).lane === "back" && ((unit as UnitState).traits.includes("ranged") || (unit as UnitState).traits.includes("reach"));
+  });
+  if (rangedBackliners.length > 0) {
+    return pickHighestAttackUnitId(match, rangedBackliners) ?? rangedBackliners[0];
+  }
+
+  return pickHighestAttackUnitId(match, enemyUnits) ?? enemyUnits[0];
 }
 
 function botPickPlayTarget(
@@ -3099,15 +3169,13 @@ function botPickPlayTarget(
   cardId: string,
 ): { ok: true; target?: PlayCardInput["target"] } | { ok: false } {
   const targetRule = getCardEffectDescriptor(cardId).targetRule;
-  const enemy = opponentOf(side);
 
   if (targetRule === "none") {
     return { ok: true };
   }
 
   if (targetRule === "ally-unit") {
-    const allies = listSideUnitIds(match, side);
-    const targetId = pickLowestHealthUnitId(match, allies);
+    const targetId = botPickAllySupportTargetId(match, side);
     if (!targetId) {
       return { ok: false };
     }
@@ -3115,7 +3183,7 @@ function botPickPlayTarget(
   }
 
   if (targetRule === "enemy-unit") {
-    const targetId = pickPriorityEnemyUnitId(match, enemy);
+    const targetId = botPickPriorityEnemyForSpell(match, side);
     if (!targetId) {
       return { ok: false };
     }
@@ -3138,17 +3206,546 @@ function botPickPlayTarget(
     if (damagedAlly) {
       return { ok: true, target: { kind: "ally-unit", unitId: damagedAlly } };
     }
-    if (allies.length > 0) {
-      return { ok: true, target: { kind: "ally-unit", unitId: allies[0] as string } };
+    const fallbackAlly = botPickAllySupportTargetId(match, side);
+    if (fallbackAlly) {
+      return { ok: true, target: { kind: "ally-unit", unitId: fallbackAlly } };
     }
     return { ok: true, target: { kind: "ally-leader" } };
   }
 
-  const enemyTargetId = pickPriorityEnemyUnitId(match, enemy);
+  const enemyTargetId = botPickPriorityEnemyForSpell(match, side);
   if (enemyTargetId) {
     return { ok: true, target: { kind: "enemy-unit", unitId: enemyTargetId } };
   }
   return { ok: true, target: { kind: "enemy-leader" } };
+}
+
+function botHasCleanseableStatus(unit: UnitState, turn: number, statuses?: ReadonlyArray<"stun" | "exposed" | "atk_down">): boolean {
+  const wants = statuses && statuses.length > 0 ? statuses : ["stun", "exposed", "atk_down"];
+  for (const status of wants) {
+    if (status === "stun" && (unit.stunnedUntilTurn ?? 0) > turn) {
+      return true;
+    }
+    if (status === "exposed" && (unit.exposedUntilTurn ?? 0) > turn) {
+      return true;
+    }
+    if (status === "atk_down" && (unit.tempAttackPenaltyUntilTurn ?? 0) > turn && (unit.tempAttackPenalty ?? 0) > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+type BotCardTimingEval = {
+  hardPreserve: boolean;
+  scoreDelta: number;
+};
+
+function botEvaluateUnitOnSummonTiming(match: MatchState, side: PlayerSide, cardId: string): BotCardTimingEval {
+  const v2 = getCardV2ById(cardId);
+  if (!v2 || v2.kind !== "unit") {
+    return { hardPreserve: false, scoreDelta: 0 };
+  }
+
+  const onSummonTriggers = (v2.triggers ?? []).filter((trigger) => trigger.when === "on_summon");
+  if (onSummonTriggers.length === 0) {
+    return { hardPreserve: false, scoreDelta: 0 };
+  }
+
+  const allyIds = listSideUnitIds(match, side);
+  const allies = allyIds.map((id) => match.units[id]).filter((unit): unit is UnitState => Boolean(unit));
+  const damagedAllies = allies.filter((ally) => ally.health < ally.maxHealth);
+  const cleanseableAllies = allies.filter((ally) => botHasCleanseableStatus(ally, match.turn));
+  const leaderMissingHp = match.players[side].leader.maxHp - match.players[side].leader.hp;
+
+  let hasSupportAllyAction = false;
+  let supportActionCanConvert = false;
+  let hasSelfOrEconomicValue = false;
+  let supportActionsCount = 0;
+  let wastedSupportActionsCount = 0;
+
+  function evalAction(action: CardActionDef, trigger: CardTriggerDef): void {
+    if (trigger.when !== "on_summon") {
+      return;
+    }
+
+    if (action.kind === "gain_shares" || action.kind === "draw_card") {
+      hasSelfOrEconomicValue = true;
+      return;
+    }
+    if (action.kind === "gain_shield" && action.target === "self") {
+      hasSelfOrEconomicValue = true;
+      return;
+    }
+    if (action.kind === "modify_attack" && action.target === "self") {
+      hasSelfOrEconomicValue = true;
+      return;
+    }
+    if (action.kind === "apply_status" && action.target === "self") {
+      hasSelfOrEconomicValue = true;
+      return;
+    }
+
+    if (action.kind === "heal" && action.target === "ally") {
+      hasSupportAllyAction = true;
+      supportActionsCount += 1;
+      if (damagedAllies.length > 0) {
+        supportActionCanConvert = true;
+      } else {
+        wastedSupportActionsCount += 1;
+      }
+      return;
+    }
+    if (action.kind === "gain_shield" && action.target === "ally") {
+      hasSupportAllyAction = true;
+      supportActionsCount += 1;
+      if (allies.length > 0) {
+        // Runtime excludes self for ally shield on summon, so pre-existing allies are required.
+        supportActionCanConvert = true;
+      } else {
+        wastedSupportActionsCount += 1;
+      }
+      return;
+    }
+    if (action.kind === "cleanse" && action.target === "ally") {
+      hasSupportAllyAction = true;
+      supportActionsCount += 1;
+      if (cleanseableAllies.length > 0) {
+        supportActionCanConvert = true;
+      } else {
+        wastedSupportActionsCount += 1;
+      }
+      return;
+    }
+    if (action.kind === "heal" && action.target === "leader") {
+      supportActionsCount += 1;
+      if (leaderMissingHp > 0) {
+        supportActionCanConvert = true;
+      } else {
+        wastedSupportActionsCount += 1;
+      }
+      return;
+    }
+  }
+
+  for (const trigger of onSummonTriggers) {
+    for (const action of trigger.actions) {
+      evalAction(action, trigger);
+    }
+  }
+
+  if (supportActionsCount === 0) {
+    return { hardPreserve: false, scoreDelta: 0 };
+  }
+
+  let scoreDelta = 0;
+  if (supportActionCanConvert) {
+    scoreDelta += 22;
+    if (damagedAllies.length > 0 || leaderMissingHp > 0) {
+      scoreDelta += 10;
+    }
+  }
+
+  if (wastedSupportActionsCount > 0) {
+    scoreDelta -= 16 * wastedSupportActionsCount;
+  }
+
+  const supportOnlyOnSummon = !hasSelfOrEconomicValue && hasSupportAllyAction && !supportActionCanConvert;
+  const earlyBoard = match.turn <= 3 && allies.length === 0;
+  if (supportOnlyOnSummon && earlyBoard) {
+    return { hardPreserve: true, scoreDelta: Number.NEGATIVE_INFINITY };
+  }
+
+  if (supportOnlyOnSummon) {
+    scoreDelta -= 48;
+  }
+
+  return { hardPreserve: false, scoreDelta };
+}
+
+function botEvaluateNonUnitTiming(
+  match: MatchState,
+  side: PlayerSide,
+  cardId: string,
+  target?: PlayCardInput["target"],
+): number {
+  const v2 = getCardV2ById(cardId);
+  if (!v2 || v2.kind === "unit") {
+    return 0;
+  }
+
+  const summary = (v2.mechanicsSummary ?? "").toLowerCase();
+  const allies = listSideUnitIds(match, side)
+    .map((id) => match.units[id])
+    .filter((unit): unit is UnitState => Boolean(unit));
+  const damagedAllies = allies.filter((ally) => ally.health < ally.maxHealth);
+  const cleanseableAllies = allies.filter((ally) => botHasCleanseableStatus(ally, match.turn));
+  const leaderMissingHp = match.players[side].leader.maxHp - match.players[side].leader.hp;
+
+  const mentionsHeal = summary.includes("heal");
+  const mentionsShield = summary.includes("shield");
+  const mentionsCleanse =
+    summary.includes("clear stun") ||
+    summary.includes("clear exposed") ||
+    summary.includes("cleanses") ||
+    summary.includes("cleanse");
+  const mentionsStun = summary.includes("stun");
+  const mentionsExposed = summary.includes("exposed");
+  const mentionsDraw = summary.includes("draw");
+  const mentionsShares = summary.includes("shares");
+
+  let scoreDelta = 0;
+
+  if (target?.kind === "ally-unit") {
+    const targetUnit = match.units[target.unitId];
+    if (targetUnit) {
+      const targetNeedsHeal = targetUnit.health < targetUnit.maxHealth;
+      const targetNeedsCleanse = botHasCleanseableStatus(targetUnit, match.turn);
+      const targetIsTaunt = targetUnit.traits.includes("taunt");
+      if (mentionsHeal && targetNeedsHeal) scoreDelta += 20;
+      if (mentionsCleanse && targetNeedsCleanse) scoreDelta += 22;
+      if (mentionsShield && targetIsTaunt) scoreDelta += 12;
+      if (mentionsHeal && !targetNeedsHeal) scoreDelta -= 10;
+      if (mentionsCleanse && !targetNeedsCleanse) scoreDelta -= 12;
+    }
+
+    if (damagedAllies.length === 0 && mentionsHeal) {
+      scoreDelta -= 12;
+    }
+    if (cleanseableAllies.length === 0 && mentionsCleanse) {
+      scoreDelta -= 14;
+    }
+  }
+
+  if (target?.kind === "ally-leader") {
+    if (mentionsHeal) {
+      scoreDelta += leaderMissingHp > 0 ? 18 : -22;
+    }
+  }
+
+  if (target?.kind === "enemy-unit") {
+    const targetUnit = match.units[target.unitId];
+    if (targetUnit) {
+      if (mentionsStun && (targetUnit.stunnedUntilTurn ?? 0) > match.turn) {
+        scoreDelta -= 16;
+      }
+      if (mentionsExposed && (targetUnit.exposedUntilTurn ?? 0) > match.turn) {
+        scoreDelta -= 8;
+      }
+      const estimatedDamage = summary.includes("deal 2 damage") ? 2 : summary.includes("deal 1 damage") ? 1 : 0;
+      if (estimatedDamage > 0 && botEffectiveUnitDurability(targetUnit) <= estimatedDamage) {
+        scoreDelta += 18;
+      }
+    }
+  }
+
+  if (target?.kind === "enemy-leader") {
+    if (mentionsShares) scoreDelta += 8;
+  }
+
+  if (!target && mentionsDraw) {
+    scoreDelta += 8;
+  }
+  if (!target && mentionsShares) {
+    scoreDelta += 6;
+  }
+
+  if (match.turn <= 2 && mentionsHeal && damagedAllies.length === 0 && leaderMissingHp === 0) {
+    scoreDelta -= 16;
+  }
+
+  return scoreDelta;
+}
+
+function botCardPlayPriorityScore(match: MatchState, side: PlayerSide, cardId: string): number {
+  const player = match.players[side];
+  const card = getCard(cardId);
+  let score = card.type === "unit" ? 100 : 70;
+
+  if (card.type === "unit") {
+    const enemyUnits = listSideUnitIds(match, opponentOf(side));
+    const ownFrontTaunts = listSideUnitIds(match, side, "front").filter((id) => match.units[id]?.traits.includes("taunt")).length;
+    const judgeGreenFree = match.players[side].board.front[JUDGE_COL] === null;
+    const judgeBlueFree = match.players[side].board.back[JUDGE_COL] === null;
+    if (card.traits.includes("taunt") && enemyUnits.length > 0 && ownFrontTaunts === 0) {
+      score += 45;
+    }
+    if (isPositiveJudgeCard(card.id) && judgeGreenFree) {
+      score += 55;
+    }
+    if (isCorruptJudgeCard(card.id) && judgeBlueFree) {
+      score += 55;
+    }
+    if ((card.traits.includes("ranged") || card.traits.includes("reach")) && listSideUnitIds(match, opponentOf(side), "back").length > 0) {
+      score += 16;
+    }
+    if (card.traits.includes("rush")) {
+      score += 10;
+    }
+
+    const timingEval = botEvaluateUnitOnSummonTiming(match, side, card.id);
+    if (timingEval.hardPreserve) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    score += timingEval.scoreDelta;
+  } else {
+    const targetPlan = botPickPlayTarget(match, side, card.id);
+    if (!targetPlan.ok) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    const effect = getCardEffectDescriptor(card.id);
+    if (effect.targetRule === "ally-unit" || effect.targetRule === "ally-unit-or-leader") {
+      score += 12;
+    }
+    if (effect.targetRule === "enemy-unit" || effect.targetRule === "enemy-unit-or-leader") {
+      score += 10;
+    }
+    score += botEvaluateNonUnitTiming(match, side, card.id, targetPlan.target);
+  }
+
+  const spendCost = card.type === "unit" || card.id === "naked_shorting" ? card.costShares : 0;
+  if (spendCost > 0) {
+    if (spendCost <= Math.max(100, Math.floor(player.shares * 0.55))) {
+      score += 8;
+    }
+    if (spendCost > player.shares * 0.9) {
+      score -= 4;
+    }
+  } else {
+    score += 6;
+  }
+
+  return score;
+}
+
+function botTryPlayOneCard(match: MatchState, side: PlayerSide, preferredCol: number): boolean {
+  if (match.status !== "active" || match.activeSide !== side) {
+    return false;
+  }
+  const player = match.players[side];
+  const handOrder = player.hand
+    .map((cardId, idx) => ({ idx, card: getCard(cardId), score: botCardPlayPriorityScore(match, side, cardId) }))
+    .filter(({ card, score }) => {
+      if (!Number.isFinite(score)) {
+        return false;
+      }
+      const spendCost = card.type === "unit" || card.id === "naked_shorting" ? card.costShares : 0;
+      return spendCost <= player.shares;
+    })
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (a.card.type !== b.card.type) return a.card.type === "unit" ? -1 : 1;
+      const aCost = a.card.type === "unit" || a.card.id === "naked_shorting" ? a.card.costShares : 0;
+      const bCost = b.card.type === "unit" || b.card.id === "naked_shorting" ? b.card.costShares : 0;
+      if (aCost !== bCost) return aCost - bCost;
+      return a.idx - b.idx;
+    });
+
+  for (const pick of handOrder) {
+    const card = pick.card;
+    if (card.type !== "unit") {
+      const targetPlan = botPickPlayTarget(match, side, card.id);
+      if (!targetPlan.ok) {
+        continue;
+      }
+      const played = playCard(match, {
+        side,
+        handIndex: pick.idx,
+        lane: "front",
+        col: 0,
+        leverage: card.id === "naked_shorting" ? 3 : undefined,
+        target: targetPlan.target,
+      });
+      if (played.ok) {
+        return true;
+      }
+      continue;
+    }
+
+    const canFront = canPlaceCardInLane(card.id, "front") || canPlaceCardInLane(card.id, "front", JUDGE_COL);
+    const canBack = canPlaceCardInLane(card.id, "back") || canPlaceCardInLane(card.id, "back", JUDGE_COL);
+
+    const targetLaneOrder: Array<"front" | "back"> = [];
+    if (card.traits.includes("back_only")) {
+      if (canBack) targetLaneOrder.push("back");
+      if (canFront) targetLaneOrder.push("front");
+    } else if (card.traits.includes("front_only") || card.traits.includes("taunt")) {
+      if (canFront) targetLaneOrder.push("front");
+      if (canBack) targetLaneOrder.push("back");
+    } else if (card.traits.includes("ranged") || card.traits.includes("negotiator") || card.traits.includes("prosecutor")) {
+      if (canBack) targetLaneOrder.push("back");
+      if (canFront) targetLaneOrder.push("front");
+    } else {
+      if (canFront) targetLaneOrder.push("front");
+      if (canBack) targetLaneOrder.push("back");
+    }
+
+    if (targetLaneOrder.length === 0) {
+      continue;
+    }
+
+    const colOrder = [preferredCol, ...new Array(BOARD_COLS).fill(0).map((_, i) => i).filter((c) => c !== preferredCol)];
+
+    const judgeSlotCandidates: Array<{ lane: "front" | "back"; col: number }> = [];
+    if (isPositiveJudgeCard(card.id)) {
+      judgeSlotCandidates.push({ lane: "front", col: JUDGE_COL });
+    }
+    if (isCorruptJudgeCard(card.id)) {
+      judgeSlotCandidates.push({ lane: "back", col: JUDGE_COL });
+    }
+    for (const slot of judgeSlotCandidates) {
+      if (!canPlaceCardInLane(card.id, slot.lane, slot.col)) {
+        continue;
+      }
+      if (player.board[slot.lane][slot.col] !== null) {
+        continue;
+      }
+      const played = playCard(match, {
+        side,
+        handIndex: pick.idx,
+        lane: slot.lane,
+        col: slot.col,
+      });
+      if (played.ok) {
+        return true;
+      }
+    }
+
+    for (const lane of targetLaneOrder) {
+      for (const col of colOrder) {
+        if (!canPlaceCardInLane(card.id, lane, col)) {
+          continue;
+        }
+        if (player.board[lane][col] !== null) {
+          continue;
+        }
+        if (col === JUDGE_COL) {
+          if (lane === "front" && !isPositiveJudgeCard(card.id)) {
+            continue;
+          }
+          if (lane === "back" && !isCorruptJudgeCard(card.id)) {
+            continue;
+          }
+        }
+
+        const played = playCard(match, {
+          side,
+          handIndex: pick.idx,
+          lane,
+          col,
+        });
+
+        if (played.ok) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+function botPlayCardCapForTurn(match: MatchState, side: PlayerSide): number {
+  const rawLevel = Number(match.players[side].botLevel ?? 3);
+  // Current product exposes L1-L3. Treat highest current/future levels (3+) as uncapped.
+  if (rawLevel <= 1) {
+    return 1 + (stableHash(`bot-cap:${match.seed}:${side}:${match.turn}:l1`) % 2);
+  }
+  if (rawLevel === 2) {
+    return 2 + (stableHash(`bot-cap:${match.seed}:${side}:${match.turn}:l2`) % 2);
+  }
+  return 8;
+}
+
+function botCanReachUnit(attacker: UnitState, target: UnitState): boolean {
+  if (target.lane === "front") {
+    return true;
+  }
+  return canReachBackline(attacker);
+}
+
+function botAttackPriorityScore(attacker: UnitState, target: UnitState): number {
+  let score = 0;
+  const effectiveDurability = botEffectiveUnitDurability(target);
+  if (attacker.attack >= effectiveDurability) {
+    score += 120;
+  }
+  if (target.traits.includes("taunt")) {
+    score += 80;
+  }
+  if (isJudgeSpecialistCard(target.cardId)) {
+    score += 35;
+  }
+  if (target.lane === "back") {
+    score += 18;
+  }
+  if (target.traits.includes("ranged") || target.traits.includes("reach")) {
+    score += 14;
+  }
+  score += target.attack * 4;
+  score += Math.max(0, 6 - effectiveDurability);
+  return score;
+}
+
+function botPickAttackTarget(match: MatchState, side: PlayerSide, attacker: UnitState): AttackInput["target"] | null {
+  const enemy = opponentOf(side);
+  const enemyTauntFrontIds = listSideUnitIds(match, enemy, "front").filter((id) => match.units[id]?.traits.includes("taunt"));
+  if (enemyTauntFrontIds.length > 0) {
+    const tauntUnits = enemyTauntFrontIds.map((id) => match.units[id]).filter((u): u is UnitState => Boolean(u));
+    const bestTaunt = tauntUnits.sort((a, b) => botAttackPriorityScore(attacker, b) - botAttackPriorityScore(attacker, a))[0];
+    return bestTaunt ? { kind: "unit", unitId: bestTaunt.id } : null;
+  }
+
+  const reachableEnemyUnits = listSideUnitIds(match, enemy)
+    .map((id) => match.units[id])
+    .filter((unit): unit is UnitState => Boolean(unit))
+    .filter((unit) => botCanReachUnit(attacker, unit));
+
+  if (reachableEnemyUnits.length > 0) {
+    reachableEnemyUnits.sort((a, b) => botAttackPriorityScore(attacker, b) - botAttackPriorityScore(attacker, a));
+    const bestTarget = reachableEnemyUnits[0];
+    if (bestTarget) {
+      return { kind: "unit", unitId: bestTarget.id };
+    }
+  }
+
+  return { kind: "leader" };
+}
+
+function botShouldSkipAttack(match: MatchState, attacker: UnitState, target: AttackInput["target"] | null): boolean {
+  if (!target || target.kind !== "unit") {
+    return false;
+  }
+  const defender = match.units[target.unitId];
+  if (!defender) {
+    return false;
+  }
+
+  const bonusToTarget = isUnitExposed(match, defender) ? 1 : 0;
+  const outgoingDamage = attacker.attack + bonusToTarget;
+  const defenderDies = outgoingDamage >= botEffectiveUnitDurability(defender);
+  if (defenderDies) {
+    return false;
+  }
+
+  const bonusToAttacker = isUnitExposed(match, attacker) ? 1 : 0;
+  const counterDamage = defender.attack + bonusToAttacker;
+  const attackerDies = counterDamage >= botEffectiveUnitDurability(attacker);
+  if (!attackerDies) {
+    return false;
+  }
+
+  const attackerV2 = getCardV2ById(attacker.cardId);
+  const attackerRole = attackerV2?.role;
+  const fragileBackliner = attacker.lane === "back" && botEffectiveUnitDurability(attacker) <= 3;
+  const supportRole = attackerRole === "support" || attackerRole === "economy" || attackerRole === "utility";
+  const lowValueDefender =
+    !defender.traits.includes("taunt") &&
+    !isJudgeSpecialistCard(defender.cardId) &&
+    defender.attack <= 2 &&
+    defender.lane === "front";
+
+  return (fragileBackliner || supportRole) && lowValueDefender;
 }
 
 export function maybeRunBot(match: MatchState): MatchState {
@@ -3192,101 +3789,15 @@ export function maybeRunBot(match: MatchState): MatchState {
     return match;
   }
 
-  const preferredCol = simpleAiPreferredCol(match.seed ^ 0x3377, match.turn);
-  const handOrder = player.hand
-    .map((cardId, idx) => ({ idx, card: getCard(cardId) }))
-    .filter(({ card }) => {
-      const spendCost = card.type === "unit" || card.id === "naked_shorting" ? card.costShares : 0;
-      return spendCost <= player.shares;
-    })
-    .sort((a, b) => {
-      if (a.card.type === b.card.type) return 0;
-      return a.card.type === "unit" ? -1 : 1;
-    });
-
-  for (const pick of handOrder) {
-    const card = pick.card;
-    if (card.type !== "unit") {
-      const targetPlan = botPickPlayTarget(match, side, card.id);
-      if (!targetPlan.ok) {
-        continue;
-      }
-      const played = playCard(match, {
-        side,
-        handIndex: pick.idx,
-        lane: "front",
-        col: 0,
-        leverage: card.id === "naked_shorting" ? 3 : undefined,
-        target: targetPlan.target,
-      });
-      if (played.ok) {
-        break;
-      }
-      continue;
-    }
-
-    const canFront = canPlaceCardInLane(card.id, "front") || canPlaceCardInLane(card.id, "front", JUDGE_COL);
-    const canBack = canPlaceCardInLane(card.id, "back") || canPlaceCardInLane(card.id, "back", JUDGE_COL);
-
-    const targetLaneOrder: Array<"front" | "back"> = [];
-    if (card.traits.includes("back_only")) {
-      if (canBack) targetLaneOrder.push("back");
-      if (canFront) targetLaneOrder.push("front");
-    } else if (card.traits.includes("front_only") || card.traits.includes("taunt")) {
-      if (canFront) targetLaneOrder.push("front");
-      if (canBack) targetLaneOrder.push("back");
-    } else if (card.traits.includes("ranged") || card.traits.includes("negotiator") || card.traits.includes("prosecutor")) {
-      if (canBack) targetLaneOrder.push("back");
-      if (canFront) targetLaneOrder.push("front");
-    } else {
-      if (canFront) targetLaneOrder.push("front");
-      if (canBack) targetLaneOrder.push("back");
-    }
-
-    if (targetLaneOrder.length === 0) {
-      continue;
-    }
-
-    const colOrder = [preferredCol, ...new Array(BOARD_COLS).fill(0).map((_, i) => i).filter((c) => c !== preferredCol)];
-    let playedUnit = false;
-
-    for (const lane of targetLaneOrder) {
-      for (const col of colOrder) {
-        if (!canPlaceCardInLane(card.id, lane, col)) {
-          continue;
-        }
-        if (player.board[lane][col] !== null) {
-          continue;
-        }
-        if (col === JUDGE_COL) {
-          if (lane === "front" && !isPositiveJudgeCard(card.id)) {
-            continue;
-          }
-          if (lane === "back" && !isCorruptJudgeCard(card.id)) {
-            continue;
-          }
-        }
-
-        const played = playCard(match, {
-          side,
-          handIndex: pick.idx,
-          lane,
-          col,
-        });
-
-        if (played.ok) {
-          playedUnit = true;
-          break;
-        }
-      }
-      if (playedUnit) {
-        break;
-      }
-    }
-
-    if (playedUnit) {
+  const botPlayCap = botPlayCardCapForTurn(match, side);
+  let botPlays = 0;
+  while (botPlays < botPlayCap && match.status === "active" && match.activeSide === side) {
+    const preferredCol = simpleAiPreferredCol(match.seed ^ 0x3377 ^ (botPlays + 1) * 131, match.turn + botPlays);
+    const played = botTryPlayOneCard(match, side, preferredCol);
+    if (!played) {
       break;
     }
+    botPlays += 1;
   }
 
   const attackers = listSideUnitIds(match, side).filter((unitId) => {
@@ -3295,35 +3806,33 @@ export function maybeRunBot(match: MatchState): MatchState {
   });
 
   for (const attackerUnitId of attackers) {
-    const enemySide = opponentOf(side);
-    const taunts = listSideUnitIds(match, enemySide, "front").filter((unitId) =>
-      match.units[unitId]?.traits.includes("taunt"),
-    );
-
-    if (taunts.length > 0) {
-      attack(match, {
-        side,
-        attackerUnitId,
-        target: { kind: "unit", unitId: taunts[0] as string },
-      });
+    const attacker = match.units[attackerUnitId];
+    if (!attacker) {
       continue;
     }
 
-    const frontUnits = listSideUnitIds(match, enemySide, "front");
-    if (frontUnits.length > 0) {
+    if (isJudgeSpecialistCard(attacker.cardId) && (isGreenJudgeUnit(attacker) || isBlueJudgeUnit(attacker))) {
+      const judgeAction = attack(match, {
+        side,
+        attackerUnitId,
+        target: { kind: "judge" },
+      });
+      if (judgeAction.ok) {
+        if ((match.status as string) === "finished") {
+          break;
+        }
+        continue;
+      }
+    }
+
+    const target = botPickAttackTarget(match, side, attacker);
+    if (target && !botShouldSkipAttack(match, attacker, target)) {
       attack(match, {
         side,
         attackerUnitId,
-        target: { kind: "unit", unitId: frontUnits[0] as string },
+        target,
       });
-      continue;
     }
-
-    attack(match, {
-      side,
-      attackerUnitId,
-      target: { kind: "leader" },
-    });
 
     if ((match.status as string) === "finished") {
       break;

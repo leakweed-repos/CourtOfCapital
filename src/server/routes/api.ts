@@ -19,7 +19,7 @@ import {
 } from "../../shared/game";
 import { DEFAULT_FACTION } from "../game/models";
 import { createInitialMatch, endTurn, playCard, applyMulligan, attack, repositionJudgeSpecialist, repayNakedShort, sideForUser, tickTimeoutsWithMeta } from "../game/engine";
-import { runAiUntilHumanTurn } from "../game/ai";
+import { runAiUntilHumanTurnWithStartDelay } from "../game/ai";
 import {
   acknowledgeTutorialStep,
   advanceTutorialAfterAction,
@@ -324,8 +324,18 @@ async function closeActiveSandboxMatchesForUser(userId: string, now: number): Pr
 }
 
 async function notifyInvite(invite: InviteState): Promise<void> {
-  const subject = "Court of Capital invite";
-  const text = `You have a Court of Capital invite from u/${invite.inviterUsername} for this week's Court. Open the weekly post and tap Accept to join the match.`;
+  const subject = "YOU'VE BEEN SERVED: Court of Capital PvP Invite";
+  const postIdBase36 = invite.postId.startsWith("t3_") ? invite.postId.slice(3) : invite.postId;
+  const postUrl = context.subredditName
+    ? `https://www.reddit.com/r/${context.subredditName}/comments/${postIdBase36}/`
+    : `https://www.reddit.com/comments/${postIdBase36}/`;
+  const text = `${invite.targetUsername}, YOU'VE BEEN SERVED.
+
+A subpoena from u/${invite.inviterUsername} has been filed for this week's Court of Capital PvP lobby.
+
+[Open your Court Case](${postUrl}) and tap **Accept** to join the match.
+
+If you'd rather ignore it, no action is required.`;
   try {
     await reddit.sendPrivateMessageAsSubreddit({
       fromSubredditName: context.subredditName,
@@ -1092,7 +1102,8 @@ api.post("/match/get", async (c) => {
       if (repaired.repaired) {
         next = repaired.match;
       }
-      next = runAiUntilHumanTurn(next);
+      // Polling route should stay responsive and avoid long lock holds; paced AI is used on action routes.
+      next = runAiUntilHumanTurnWithStartDelay(next);
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt, { force: repaired.repaired });
 
@@ -1238,7 +1249,7 @@ api.post("/match/mulligan", async (c) => {
         });
       }
       const result = applyMulligan(next, body.action);
-      next = runAiUntilHumanTurn(result.match);
+      next = runAiUntilHumanTurnWithStartDelay(result.match);
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1306,7 +1317,7 @@ api.post("/match/play", async (c) => {
       if (result.ok) {
         advanceTutorialAfterAction(result.match, "play");
       }
-      next = runAiUntilHumanTurn(result.match);
+      next = runAiUntilHumanTurnWithStartDelay(result.match);
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1374,7 +1385,7 @@ api.post("/match/attack", async (c) => {
       if (result.ok) {
         advanceTutorialAfterAction(result.match, "attack");
       }
-      next = runAiUntilHumanTurn(result.match);
+      next = runAiUntilHumanTurnWithStartDelay(result.match);
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1438,7 +1449,7 @@ api.post("/match/reposition-judge", async (c) => {
         });
       }
       const result = repositionJudgeSpecialist(next, body.action);
-      next = runAiUntilHumanTurn(result.match);
+      next = runAiUntilHumanTurnWithStartDelay(result.match);
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1514,7 +1525,7 @@ api.post("/match/end-turn", async (c) => {
         advanceTutorialAfterAction(progressed, "end-turn");
         next = progressed;
       }
-      next = runAiUntilHumanTurn(next);
+      next = runAiUntilHumanTurnWithStartDelay(next);
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1578,7 +1589,7 @@ api.post("/match/repay-naked-short", async (c) => {
         });
       }
       const result = repayNakedShort(next, body.action.side);
-      next = runAiUntilHumanTurn(result.match);
+      next = runAiUntilHumanTurnWithStartDelay(result.match);
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);

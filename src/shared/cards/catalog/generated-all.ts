@@ -6006,7 +6006,7 @@ export const CARD_CATALOG_V2_SNAPSHOT: CardCatalogV2 = [
     "faction": "neutral",
     "description": "Cell by cell stability.",
     "role": "utility",
-    "costShares": 82,
+    "costShares": 35,
     "impactTargetRule": "none",
     "mechanicsSummary": "Gain +70 shares and reduce debt by up to 80.",
     "kind": "instrument",
