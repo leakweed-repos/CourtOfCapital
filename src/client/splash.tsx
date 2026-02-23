@@ -4,8 +4,9 @@ import { context, getWebViewMode, requestExpandedMode } from "@devvit/web/client
 import { StrictMode, type ReactNode, type SyntheticEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { API_ROUTES, postJson, type LobbyRequest, type LobbyResponse } from "../shared/api";
-import { CARD_PREVIEW, getCardPreview, type CardPreviewMeta } from "../shared/cards";
+import { CARD_PREVIEW, getCardPreview, getDisplayAbilitiesLine, type CardPreviewMeta } from "../shared/cards";
 import type { FactionId } from "../shared/game";
+import { factionLabel, readWeekIdFromPostData, readWeekNumberFromPostData } from "./view-meta";
 
 type ModalId = "top10" | "about" | "collection" | null;
 type TopBoardId = "pvp" | "l1" | "l2" | "l3";
@@ -30,28 +31,12 @@ const FRACTIONS: readonly FactionMeta[] = [
   { id: "short_hedgefund", label: "Short Hedgefund", motto: "Dirty value and Judge heat." },
 ];
 
-function readPostField(name: "weekId" | "weekNumber"): string | number | null {
-  if (typeof context.postData !== "object" || context.postData === null) {
-    return null;
-  }
-  const value = Reflect.get(context.postData, name);
-  if (typeof value === "string" || typeof value === "number") {
-    return value;
-  }
-  return null;
-}
-
 function readWeekId(): string {
-  const weekId = readPostField("weekId");
-  return typeof weekId === "string" && weekId.trim().length > 0 ? weekId : "unknown-week";
+  return readWeekIdFromPostData(context.postData);
 }
 
 function readWeekNumber(): number {
-  const weekNumber = readPostField("weekNumber");
-  if (typeof weekNumber === "number" && Number.isFinite(weekNumber) && weekNumber >= 0) {
-    return Math.floor(weekNumber);
-  }
-  return 0;
+  return readWeekNumberFromPostData(context.postData);
 }
 
 function byCardName(a: CardPreviewMeta, b: CardPreviewMeta): number {
@@ -60,10 +45,6 @@ function byCardName(a: CardPreviewMeta, b: CardPreviewMeta): number {
 
 function compact(text: string, max = 30): string {
   return text.length > max ? `${text.slice(0, max)}...` : text;
-}
-
-function factionLabel(faction: string): string {
-  return faction.replace(/_/g, " ");
 }
 
 function applyArtFallback(event: SyntheticEvent<HTMLImageElement>): void {
@@ -128,6 +109,7 @@ export function Splash() {
   const [topL1, setTopL1] = useState<LobbyResponse["snapshot"]["leaderboardPveByLevel"]["l1"]>([]);
   const [topL2, setTopL2] = useState<LobbyResponse["snapshot"]["leaderboardPveByLevel"]["l2"]>([]);
   const [topL3, setTopL3] = useState<LobbyResponse["snapshot"]["leaderboardPveByLevel"]["l3"]>([]);
+  const [isActiveWeekPost, setIsActiveWeekPost] = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -151,6 +133,7 @@ export function Splash() {
       setTopL1(response.data.snapshot.leaderboardPveByLevel?.l1 ?? []);
       setTopL2(response.data.snapshot.leaderboardPveByLevel?.l2 ?? []);
       setTopL3(response.data.snapshot.leaderboardPveByLevel?.l3 ?? []);
+      setIsActiveWeekPost(response.data.snapshot.isActiveWeek);
       setLoadingLobby(false);
     }
 
@@ -186,6 +169,10 @@ export function Splash() {
   const isFactionUnlocked = activeCollectionFaction === "retail_mob" || unlockedFactions.includes(activeCollectionFaction);
   const topRows = activeBoard === "pvp" ? topPvp : activeBoard === "l1" ? topL1 : activeBoard === "l2" ? topL2 : topL3;
   const expandedCard = expandedCardId ? getCardPreview(expandedCardId) : null;
+  const expandedAbilitiesLine = useMemo(
+    () => (expandedCardId ? getDisplayAbilitiesLine(getCardPreview(expandedCardId)) : ""),
+    [expandedCardId],
+  );
   const leaderboardRowsPerPage = webViewMode === "inline" ? 5 : 8;
   const collectionCardsPerPage = webViewMode === "inline" ? 4 : 8;
   const factionCardsChunks = useMemo(() => chunkItems(activeFactionCards, collectionCardsPerPage), [activeFactionCards, collectionCardsPerPage]);
@@ -533,6 +520,8 @@ export function Splash() {
   const modalPages = activeModal === "about" ? aboutPages : activeModal === "top10" ? leaderboardPages : activeModal === "collection" ? collectionPages : [];
   const clampedModalPageIndex = modalPages.length === 0 ? 0 : Math.min(modalPageIndex, modalPages.length - 1);
   const currentModalPage = modalPages[clampedModalPageIndex] ?? null;
+  const enterCourtDisabled = isActiveWeekPost === false;
+  const enterCourtActive = isActiveWeekPost === true;
 
   return (
     <div className={`app-shell app-shell--splash app-shell--splash-clean wv-${webViewMode} ${platformClass}`}>
@@ -545,10 +534,22 @@ export function Splash() {
       </section>
 
       <section className="card-block sb-middle" aria-label="Primary action">
-        <button className="action-btn action-btn--primary sb-enter" onClick={(event) => requestExpandedMode(event.nativeEvent, "game")}>
-          Enter Court
+        <button
+          className={`action-btn action-btn--primary sb-enter ${enterCourtActive ? "is-active-week" : ""} ${enterCourtDisabled ? "is-archived" : ""}`}
+          disabled={enterCourtDisabled}
+          onClick={(event) => {
+            if (enterCourtDisabled) {
+              return;
+            }
+            requestExpandedMode(event.nativeEvent, "game");
+          }}
+        >
+          {enterCourtDisabled ? "Case Closed" : "Enter Court"}
         </button>
-        <p className="sb-weekline">Week #{weekNumber} {weekId}</p>
+        <p className="sb-weekline">
+          Week #{weekNumber} {weekId}
+          {enterCourtDisabled ? " · archived (leaderboard only)" : ""}
+        </p>
       </section>
 
       <section className="card-block sb-bottom" aria-label="Secondary navigation">
@@ -621,18 +622,27 @@ export function Splash() {
                   <span>HP {expandedCard.defense ?? "-"}</span>
                   <span>DIRTY {expandedCard.dirtyPower}</span>
                 </div>
-                <p className="full-copy"><strong>Card impact:</strong> {expandedCard.effectText}</p>
-                <p className="full-copy"><strong>Survival:</strong> {expandedCard.resistanceText}</p>
+                <p className="full-copy"><strong>Card impact:</strong> {expandedCard.cardImpactLine}</p>
+                <p className="full-copy"><strong>Role:</strong> {expandedCard.roleLine}</p>
+                <p className="full-copy"><strong>Abilities:</strong> {expandedAbilitiesLine}</p>
+                {expandedCard.triggersLine ? (
+                  <p className="full-copy"><strong>Triggers:</strong> {expandedCard.triggersLine}</p>
+                ) : null}
+                {expandedCard.specialsLine ? (
+                  <p className="full-copy"><strong>Specials:</strong> {expandedCard.specialsLine}</p>
+                ) : null}
+                <p className="full-copy"><strong>Faction passive:</strong> {expandedCard.factionPassiveLine}</p>
+                <p className="full-copy"><strong>Survival:</strong> {expandedCard.survivalLine}</p>
               </div>
             </div>
             <div className="full-preview-foot">
               <article className="full-copy-block">
-                <h3>Lore</h3>
-                <p>{expandedCard.flavorText || "No lore text yet."}</p>
+                <h3>Court Record</h3>
+                <p>{expandedCard.courtRecordText}</p>
               </article>
               <article className="full-copy-block">
                 <h3>Full effect text</h3>
-                <p>{expandedCard.effectText}</p>
+                <p>{expandedCard.fullEffectShortText}</p>
               </article>
             </div>
           </div>

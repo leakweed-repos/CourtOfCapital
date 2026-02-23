@@ -9,7 +9,7 @@ import {
   type PvpLobbyResponse,
   type PvpLobbyStartResponse,
 } from "../shared/api";
-import { getCardPreview } from "../shared/cards";
+import { getCardPreview, getDisplayAbilitiesLine } from "../shared/cards";
 import {
   type EventUnitState,
   JUDGE_COL,
@@ -25,7 +25,9 @@ import {
   type PvpLobbySummary,
   type TutorialScenarioId,
 } from "../shared/game";
-import { isJudgeCorruptSpecialistCard, isJudgePositiveSpecialistCard, isJudgeSpecialistCard, isStrictBackOnly } from "../shared/placement";
+import { isJudgeCorruptSpecialistCard, isJudgePositiveSpecialistCard, isJudgeSpecialistCard } from "../shared/placement";
+import { shouldDiscardMatchResponse } from "./match-sync";
+import { factionLabel, readWeekIdFromPostData, readWeekNumberFromPostData } from "./view-meta";
 import "./index.css";
 
 type UiContext = {
@@ -90,30 +92,11 @@ type RemoteAction =
   | { kind: "play" }
   | { kind: "attack"; attackerName: string; target: { kind: "leader" } | { kind: "unit"; name: string } | { kind: "event"; name: string } };
 
-function readWeekIdFromPostData(): string {
-  if (!context.postData || typeof context.postData !== "object") {
-    return "unknown-week";
-  }
-  const weekId = (context.postData as Record<string, unknown>).weekId;
-  return typeof weekId === "string" && weekId.trim().length > 0 ? weekId : "unknown-week";
-}
-
-function readWeekNumberFromPostData(): number {
-  if (!context.postData || typeof context.postData !== "object") {
-    return 0;
-  }
-  const weekNumber = (context.postData as Record<string, unknown>).weekNumber;
-  if (typeof weekNumber === "number" && Number.isFinite(weekNumber) && weekNumber >= 0) {
-    return Math.floor(weekNumber);
-  }
-  return 0;
-}
-
 function readContext(): UiContext {
   const clientName = context.client?.name;
   return {
-    weekId: readWeekIdFromPostData(),
-    weekNumber: readWeekNumberFromPostData(),
+    weekId: readWeekIdFromPostData(context.postData),
+    weekNumber: readWeekNumberFromPostData(context.postData),
     postId: context.postId ?? "",
     userId: context.userId ?? "",
     username: normalizeUsername(context.username ?? "guest"),
@@ -192,10 +175,6 @@ function tutorialResumeLabel(summary: LobbyMatchSummary): string {
     return "Cleanup Playground";
   }
   return tutorialScenarioLabel(summary.tutorialScenarioId);
-}
-
-function factionLabel(faction: string): string {
-  return faction.replace(/_/g, " ");
 }
 
 function roleLabel(role: "offensive" | "defensive" | "bureaucrat" | "utility"): string {
@@ -317,42 +296,6 @@ function unitStatusTokens(unit: MatchState["units"][string], turn: number): Unit
 
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
-}
-
-function streetEffectText(text: string): string {
-  let out = oneLine(text).replace(/^Effect:\s*/i, "");
-  const replacements: Array<[RegExp, string]> = [
-    [/\bdeploy\b/gi, "play"],
-    [/\bfront row\b/gi, "front line"],
-    [/\bback row\b/gi, "back line"],
-    [/\bally unit\b/gi, "your unit"],
-    [/\benemy unit\b/gi, "opponent unit"],
-    [/\bally leader\b/gi, "your leader"],
-    [/\benemy leader\b/gi, "opponent leader"],
-    [/\bjudge green slot\b/gi, "Green Judge slot"],
-    [/\bjudge blue slot\b/gi, "Blue Judge slot"],
-    [/\bprobation\b/gi, "Judge heat"],
-  ];
-  for (const [pattern, replacement] of replacements) {
-    out = out.replace(pattern, replacement);
-  }
-  return out;
-}
-
-function streetResistanceText(text: string): string {
-  const cleaned = oneLine(text).replace(/^Resistance:\s*/i, "");
-  if (/n\/a|non-unit/i.test(cleaned)) {
-    return "No armor tricks here. This card wins with timing.";
-  }
-  return `Toughness: ${cleaned}.`;
-}
-
-function streetLoreText(flavorText: string): string {
-  const cleaned = oneLine(flavorText);
-  if (!cleaned) {
-    return "Simple plan: play it at the right time and cash the tempo.";
-  }
-  return cleaned;
 }
 
 function ordinal(value: number): string {
@@ -528,7 +471,7 @@ function canUnitCardDropTo(card: CardPreview, lane: "front" | "back", col: numbe
   if (card.traits.includes("taunt") || card.traits.includes("front_only")) {
     baseAllowed = lane === "front";
   } else if (card.traits.includes("back_only")) {
-    baseAllowed = isStrictBackOnly(card.id) ? lane === "back" : true;
+    baseAllowed = lane === "back";
   }
 
   if (!baseAllowed) {
@@ -581,7 +524,7 @@ function BoardUnitTile({ unit, turn }: { unit: MatchState["units"][string]; turn
   return (
     <div className="slot-body board-unit-tile">
       <img
-        className="board-unit-avatar"
+        className={`board-unit-avatar${card.traits.includes("taunt") ? " board-unit-avatar--taunt" : ""}`}
         src={avatarPath}
         data-fallback-src={HAND_ONBOARD_FALLBACK_PATH}
         alt=""
@@ -672,6 +615,8 @@ export function GameApp() {
   const attackInputCooldownUntilRef = useRef(0);
   const pvpJoinedPrevRef = useRef(false);
   const matchRef = useRef<MatchState | null>(null);
+  const matchRequestSeqRef = useRef(0);
+  const matchAppliedRequestSeqRef = useRef(0);
   const seenLogCursorRef = useRef<{ matchId: string; index: number } | null>(null);
   const battleShellRef = useRef<HTMLElement | null>(null);
 
@@ -734,16 +679,28 @@ export function GameApp() {
     if (remoteAnimatingRef.current) {
       return;
     }
+    matchRequestSeqRef.current += 1;
+    const requestSeq = matchRequestSeqRef.current;
     const response = await postJson(API_ROUTES.matchGet, { matchId });
     if (!response.ok) {
       setError(response.error);
       return;
     }
     const nextMatch = response.data.match;
-    if (!allowSwitch && (!matchRef.current || matchRef.current.id !== matchId)) {
+    const currentMatch = matchRef.current;
+    if (
+      shouldDiscardMatchResponse({
+        requestSeq,
+        latestAppliedRequestSeq: matchAppliedRequestSeqRef.current,
+        allowSwitch,
+        requestedMatchId: matchId,
+        currentMatch,
+        incomingMatch: nextMatch,
+      })
+    ) {
       return;
     }
-    const prevMatch = matchRef.current;
+    const prevMatch = currentMatch;
 
     if (prevMatch && prevMatch.updatedAt !== nextMatch.updatedAt) {
       const myPrevSide = sideForUser(prevMatch, ctx.userId);
@@ -764,6 +721,21 @@ export function GameApp() {
       }
     }
 
+    const latestCurrentMatch = matchRef.current;
+    if (
+      shouldDiscardMatchResponse({
+        requestSeq,
+        latestAppliedRequestSeq: matchAppliedRequestSeqRef.current,
+        allowSwitch,
+        requestedMatchId: matchId,
+        currentMatch: latestCurrentMatch,
+        incomingMatch: nextMatch,
+      })
+    ) {
+      return;
+    }
+
+    matchAppliedRequestSeqRef.current = requestSeq;
     matchRef.current = nextMatch;
     setMatch(nextMatch);
   }
@@ -985,6 +957,8 @@ export function GameApp() {
 
   async function runAction(route: string, action: Record<string, unknown>, options?: { clearArmed?: boolean }): Promise<void> {
     if (!match) return;
+    matchRequestSeqRef.current += 1;
+    const requestSeq = matchRequestSeqRef.current;
 
     const response = await postJson(route, {
       matchId: match.id,
@@ -998,13 +972,43 @@ export function GameApp() {
     }
 
     if (!response.data.result.ok) {
+      const nextMatch = response.data.result.match;
+      if (
+        shouldDiscardMatchResponse({
+          requestSeq,
+          latestAppliedRequestSeq: matchAppliedRequestSeqRef.current,
+          allowSwitch: true,
+          requestedMatchId: match.id,
+          currentMatch: matchRef.current,
+          incomingMatch: nextMatch,
+        })
+      ) {
+        return;
+      }
       setError(response.data.result.error ?? "Action failed.");
-      setMatch(response.data.result.match);
+      matchAppliedRequestSeqRef.current = requestSeq;
+      matchRef.current = nextMatch;
+      setMatch(nextMatch);
       return;
     }
 
+    const nextMatch = response.data.result.match;
+    if (
+      shouldDiscardMatchResponse({
+        requestSeq,
+        latestAppliedRequestSeq: matchAppliedRequestSeqRef.current,
+        allowSwitch: true,
+        requestedMatchId: match.id,
+        currentMatch: matchRef.current,
+        incomingMatch: nextMatch,
+      })
+    ) {
+      return;
+    }
     setError("");
-    setMatch(response.data.result.match);
+    matchAppliedRequestSeqRef.current = requestSeq;
+    matchRef.current = nextMatch;
+    setMatch(nextMatch);
     if (options?.clearArmed !== false) {
       setArmedAttackerUnitId(null);
     }
@@ -1445,6 +1449,7 @@ export function GameApp() {
   useEffect(() => {
     if (!match) return;
     const id = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
       void refreshMatch(match.id);
     }, 1000);
     return () => window.clearInterval(id);
@@ -1454,6 +1459,7 @@ export function GameApp() {
   useEffect(() => {
     if (match || !activePvpLobby) return;
     const id = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
       void refreshActivePvpLobby(activePvpLobby.id);
     }, 1000);
     return () => window.clearInterval(id);
@@ -1467,6 +1473,7 @@ export function GameApp() {
     const syncedNow = Date.now() + serverClockSkewMs;
     const delayMs = Math.max(80, deadlineAt - syncedNow + 40);
     const id = window.setTimeout(() => {
+      if (document.visibilityState === "hidden") return;
       void refreshMatch(match.id);
     }, delayMs);
     return () => window.clearTimeout(id);
@@ -1575,6 +1582,10 @@ export function GameApp() {
 
   const selectedCard = selectedCardId ? getCardPreview(selectedCardId) : null;
   const expandedCard = expandedCardId ? getCardPreview(expandedCardId) : null;
+  const expandedAbilitiesLine = useMemo(
+    () => (expandedCardId ? getDisplayAbilitiesLine(getCardPreview(expandedCardId)) : ""),
+    [expandedCardId],
+  );
   const allyInspectCard = selectedCard ?? (allyInspectCardId ? getCardPreview(allyInspectCardId) : null);
   const enemyInspectUnit =
     enemyInspectUnitId && match && enemySide && match.units[enemyInspectUnitId]?.owner === enemySide
@@ -2563,8 +2574,8 @@ export function GameApp() {
                           <h4>{allyInspectCard.name}</h4>
                           <p>{factionLabel(allyInspectCard.faction)} · {allyInspectCard.type} · {roleLabel(allyInspectCard.role)}</p>
                           <p>atk {allyInspectCard.attack ?? "-"} · hp {allyInspectCard.defense ?? "-"} · cost {allyInspectCard.costShares}</p>
-                          <p>Effect: {allyInspectCard.effectText}</p>
-                          <p>{allyInspectCard.resistanceText}</p>
+                          <p>Use: {allyInspectCard.fullEffectShortText}</p>
+                          <p>Survival: {allyInspectCard.survivalLine}</p>
                         </>
                       ) : (
                         <p>Tap your hand card or your unit to inspect details.</p>
@@ -2578,8 +2589,8 @@ export function GameApp() {
                           <p>{factionLabel(enemyInspectCard.faction)} · {enemyInspectCard.type} · {roleLabel(enemyInspectCard.role)}</p>
                           <p>atk {enemyInspectUnit.attack} · hp {enemyInspectUnit.health} · cost {enemyInspectCard.costShares}</p>
                           {enemyInspectStatuses.length > 0 ? <p>Status: {enemyInspectStatuses.map((status) => status.title).join(" | ")}</p> : null}
-                          <p>Effect: {enemyInspectCard.effectText}</p>
-                          <p>{enemyInspectCard.resistanceText}</p>
+                          <p>Use: {enemyInspectCard.fullEffectShortText}</p>
+                          <p>Survival: {enemyInspectCard.survivalLine}</p>
                         </>
                       ) : enemyInspectEventDetails ? (
                         <>
@@ -2612,7 +2623,7 @@ export function GameApp() {
                         return (
                           <button
                             key={`${cardId}-${idx}`}
-                            className={`hand-card has-onboard ${selectedHandIndex === idx ? "selected" : ""} ${centerHandIndex === idx ? "centered" : ""} ${tutorialState?.coachAnchorKind === "hand-card" && tutorialState.coachCardId === cardId ? "tutorial-emphasis" : ""}`}
+                            className={`hand-card has-onboard ${card.traits.includes("taunt") ? "hand-card--taunt" : ""} ${selectedHandIndex === idx ? "selected" : ""} ${centerHandIndex === idx ? "centered" : ""} ${tutorialState?.coachAnchorKind === "hand-card" && tutorialState.coachCardId === cardId ? "tutorial-emphasis" : ""}`}
                             data-hand-index={idx}
                             data-hand-card-id={cardId}
                             onClick={() => onHandCardTap(idx, cardId)}
@@ -2884,18 +2895,27 @@ export function GameApp() {
                     <span>HP {expandedCard.defense ?? "-"}</span>
                     <span>DIRTY {expandedCard.dirtyPower}</span>
                   </div>
-                  <p className="full-copy"><strong>Card impact:</strong> {streetEffectText(expandedCard.effectText)}</p>
-                  <p className="full-copy"><strong>Survival:</strong> {streetResistanceText(expandedCard.resistanceText)}</p>
+                  <p className="full-copy"><strong>Card impact:</strong> {expandedCard.cardImpactLine}</p>
+                  <p className="full-copy"><strong>Role:</strong> {expandedCard.roleLine}</p>
+                  <p className="full-copy"><strong>Abilities:</strong> {expandedAbilitiesLine}</p>
+                  {expandedCard.triggersLine ? (
+                    <p className="full-copy"><strong>Triggers:</strong> {expandedCard.triggersLine}</p>
+                  ) : null}
+                  {expandedCard.specialsLine ? (
+                    <p className="full-copy"><strong>Specials:</strong> {expandedCard.specialsLine}</p>
+                  ) : null}
+                  <p className="full-copy"><strong>Faction passive:</strong> {expandedCard.factionPassiveLine}</p>
+                  <p className="full-copy"><strong>Survival:</strong> {expandedCard.survivalLine}</p>
                 </div>
               </div>
               <div className="full-preview-foot">
                 <article className="full-copy-block">
-                  <h3>Street read</h3>
-                  <p>{streetLoreText(expandedCard.flavorText)}</p>
+                  <h3>Court Record</h3>
+                  <p>{expandedCard.courtRecordText}</p>
                 </article>
                 <article className="full-copy-block">
                   <h3>Full effect text</h3>
-                  <p>{expandedCard.effectText}</p>
+                  <p>{expandedCard.fullEffectShortText}</p>
                 </article>
               </div>
             </div>
@@ -2912,7 +2932,7 @@ export function GameApp() {
                   return (
                     <button
                       key={`mulligan-${idx}`}
-                      className={`hand-card ${mulliganPick.includes(idx) ? "selected" : ""}`}
+                      className={`hand-card ${card.traits.includes("taunt") ? "hand-card--taunt" : ""} ${mulliganPick.includes(idx) ? "selected" : ""}`}
                       onClick={() => {
                         setMulliganPick((prev) => (prev.includes(idx) ? prev.filter((x) => x !== idx) : [...prev, idx]));
                       }}
@@ -2950,8 +2970,3 @@ createRoot(rootEl).render(
     <GameApp />
   </StrictMode>,
 );
-
-
-
-
-

@@ -1,4 +1,5 @@
 import { randomInt } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { createInitialMatch, maybeRunBot, tickTimeouts } from "../src/server/game/engine.ts";
 import { stableHash, type FactionId, type MatchState, type MatchWinReason, type PlayerSide } from "../src/shared/game.ts";
 
@@ -9,6 +10,11 @@ const MAX_BOT_STEPS = Number(process.env.COC_SIM_STEPS ?? 220);
 const SWAP_SIDES = process.env.COC_SIM_SWAP !== "0";
 const FORCE_DETERMINISTIC = process.argv.includes("--det") || process.argv.includes("--deterministic");
 const RANDOMIZE_SEEDS = !FORCE_DETERMINISTIC && process.env.COC_SIM_RANDOM_SEEDS !== "0";
+const FORCE_FACTION_ONLY = process.argv.includes("--faction-only");
+const FACTION_ONLY_SIM_DECKS = FORCE_FACTION_ONLY || process.env.COC_SIM_FACTION_ONLY === "1";
+if (FACTION_ONLY_SIM_DECKS) {
+  process.env.COC_SIM_FACTION_ONLY = "1";
+}
 
 type Totals = {
   games: number;
@@ -33,6 +39,43 @@ type SimResult = {
   winner: PlayerSide | null;
   match: MatchState;
   forced: boolean;
+};
+
+export type FactionBalanceRow = {
+  faction: FactionId;
+  games: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  winRatePct: number;
+  avgTurns: number;
+  forcedRatePct: number;
+};
+
+export type PairBalanceRow = {
+  matchup: string;
+  games: number;
+  leftWins: number;
+  rightWins: number;
+  draws: number;
+  leftWinRatePct: number;
+  rightWinRatePct: number;
+  drawRatePct: number;
+  avgTurns: number;
+};
+
+export type BalanceSimulationReport = {
+  gamesPerPair: number;
+  maxBotSteps: number;
+  seedMode: "random" | "deterministic";
+  deckMode: "faction-only" | "faction-plus-neutral";
+  sideSwapMode: boolean;
+  sideAWins: number;
+  sideBWins: number;
+  sideDraws: number;
+  sideGames: number;
+  factionRows: FactionBalanceRow[];
+  pairRows: PairBalanceRow[];
 };
 
 function emptyTotals(): Totals {
@@ -112,7 +155,7 @@ function simSeed(left: FactionId, right: FactionId, game: number, aFaction: Fact
   return stableHash(`${base}:rand:${randomInt(0x7fffffff)}`);
 }
 
-function main(): void {
+export function runBalanceSimulation(): BalanceSimulationReport {
   const factionTotals = new Map<FactionId, Totals>(FACTIONS.map((f) => [f, emptyTotals()]));
   const pairTotals = new Map<string, PairTotals>();
   let sideAWins = 0;
@@ -190,20 +233,20 @@ function main(): void {
 
   const factionRows = FACTIONS.map((faction) => {
     const row = factionTotals.get(faction) as Totals;
-    const winRate = row.games > 0 ? (row.wins / row.games) * 100 : 0;
+    const winRatePct = row.games > 0 ? (row.wins / row.games) * 100 : 0;
     const avgTurns = row.games > 0 ? row.totalTurns / row.games : 0;
-    const forcedRate = row.games > 0 ? (row.forcedFinishes / row.games) * 100 : 0;
+    const forcedRatePct = row.games > 0 ? (row.forcedFinishes / row.games) * 100 : 0;
     return {
       faction,
       games: row.games,
       wins: row.wins,
       losses: row.losses,
       draws: row.draws,
-      winRate: `${winRate.toFixed(1)}%`,
-      avgTurns: avgTurns.toFixed(1),
-      forcedRate: `${forcedRate.toFixed(1)}%`,
+      winRatePct,
+      avgTurns,
+      forcedRatePct,
     };
-  }).sort((a, b) => Number.parseFloat(b.winRate) - Number.parseFloat(a.winRate));
+  }).sort((a, b) => b.winRatePct - a.winRatePct);
 
   const pairRows = [...pairTotals.values()].map((pair) => {
     const leftWinRate = pair.games > 0 ? (pair.leftWins / pair.games) * 100 : 0;
@@ -212,25 +255,80 @@ function main(): void {
     return {
       matchup: `${pair.left} vs ${pair.right}`,
       games: pair.games,
-      leftWins: `${pair.leftWins} (${leftWinRate.toFixed(1)}%)`,
-      rightWins: `${pair.rightWins} (${rightWinRate.toFixed(1)}%)`,
-      draws: `${pair.draws} (${drawRate.toFixed(1)}%)`,
-      avgTurns: (pair.totalTurns / pair.games).toFixed(1),
+      leftWins: pair.leftWins,
+      rightWins: pair.rightWins,
+      draws: pair.draws,
+      leftWinRatePct: leftWinRate,
+      rightWinRatePct: rightWinRate,
+      drawRatePct: drawRate,
+      avgTurns: pair.totalTurns / pair.games,
     };
   });
 
-  console.log(`\nCourt of Capital balance simulation`);
-  console.log(`games per unordered faction pair: ${GAMES_PER_PAIR}`);
-  console.log(`max bot steps per game: ${MAX_BOT_STEPS}\n`);
-  console.log(`seed mode: ${RANDOMIZE_SEEDS ? "random per game (non-deterministic)" : "deterministic (stableHash only)"}`);
-  console.log(
-    `side-A wins: ${sideAWins}/${sideGames} (${((sideAWins / Math.max(1, sideGames)) * 100).toFixed(1)}%) | ` +
-      `side-B wins: ${sideBWins}/${sideGames} (${((sideBWins / Math.max(1, sideGames)) * 100).toFixed(1)}%) | ` +
-      `draws: ${sideDraws}`,
-  );
-  console.log(`side swap mode: ${SWAP_SIDES ? "on" : "off"}\n`);
-  console.table(factionRows);
-  console.table(pairRows);
+  return {
+    gamesPerPair: GAMES_PER_PAIR,
+    maxBotSteps: MAX_BOT_STEPS,
+    seedMode: RANDOMIZE_SEEDS ? "random" : "deterministic",
+    deckMode: FACTION_ONLY_SIM_DECKS ? "faction-only" : "faction-plus-neutral",
+    sideSwapMode: SWAP_SIDES,
+    sideAWins,
+    sideBWins,
+    sideDraws,
+    sideGames,
+    factionRows,
+    pairRows,
+  };
 }
 
-main();
+export function printBalanceSimulation(report: BalanceSimulationReport): void {
+  const factionRowsForTable = report.factionRows.map((row) => ({
+    faction: row.faction,
+    games: row.games,
+    wins: row.wins,
+    losses: row.losses,
+    draws: row.draws,
+    winRate: `${row.winRatePct.toFixed(1)}%`,
+    avgTurns: row.avgTurns.toFixed(1),
+    forcedRate: `${row.forcedRatePct.toFixed(1)}%`,
+  }));
+
+  const pairRowsForTable = report.pairRows.map((pair) => ({
+    matchup: pair.matchup,
+    games: pair.games,
+    leftWins: `${pair.leftWins} (${pair.leftWinRatePct.toFixed(1)}%)`,
+    rightWins: `${pair.rightWins} (${pair.rightWinRatePct.toFixed(1)}%)`,
+    draws: `${pair.draws} (${pair.drawRatePct.toFixed(1)}%)`,
+    avgTurns: pair.avgTurns.toFixed(1),
+  }));
+
+  console.log(`\nCourt of Capital balance simulation`);
+  console.log(`games per unordered faction pair: ${report.gamesPerPair}`);
+  console.log(`max bot steps per game: ${report.maxBotSteps}\n`);
+  console.log(`seed mode: ${report.seedMode === "random" ? "random per game (non-deterministic)" : "deterministic (stableHash only)"}`);
+  console.log(`deck mode: ${report.deckMode === "faction-only" ? "faction-only (no neutral/utility cards)" : "70 faction + 30 neutral/utility"}`);
+  console.log(
+    `side-A wins: ${report.sideAWins}/${report.sideGames} (${((report.sideAWins / Math.max(1, report.sideGames)) * 100).toFixed(1)}%) | ` +
+      `side-B wins: ${report.sideBWins}/${report.sideGames} (${((report.sideBWins / Math.max(1, report.sideGames)) * 100).toFixed(1)}%) | ` +
+      `draws: ${report.sideDraws}`,
+  );
+  console.log(`side swap mode: ${report.sideSwapMode ? "on" : "off"}\n`);
+  console.table(factionRowsForTable);
+  console.table(pairRowsForTable);
+}
+
+function isMain(): boolean {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+  return pathToFileURL(entry).href === import.meta.url;
+}
+
+function main(): void {
+  const report = runBalanceSimulation();
+  printBalanceSimulation(report);
+}
+
+if (isMain()) {
+  main();
+}

@@ -250,6 +250,7 @@ export interface LobbyMatchSummary {
 export interface LobbySnapshot {
   weekId: string;
   postId: string;
+  isActiveWeek: boolean;
   unlockedFactions: FactionId[];
   pendingInvites: InviteState[];
   pvpLobbies: PvpLobbySummary[];

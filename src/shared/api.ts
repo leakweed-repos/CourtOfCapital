@@ -167,16 +167,47 @@ async function parseJsonBody<T>(response: Response): Promise<T | null> {
   }
 }
 
+const POST_JSON_TIMEOUT_MS = 15_000;
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- default generic keeps postJson ergonomic at call sites
 export async function postJson<TRequest, TResponse = any>(
   url: string,
   body: TRequest,
 ): Promise<ApiResponse<TResponse>> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timeoutId =
+    controller === null
+      ? null
+      : setTimeout(() => {
+          controller.abort();
+        }, POST_JSON_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller?.signal ?? null,
+    });
+  } catch (error) {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+    const message =
+      error instanceof Error
+        ? error.name === "AbortError"
+          ? "Network timeout while contacting server."
+          : `Network error: ${error.message}`
+        : "Network error while contacting server.";
+    return {
+      ok: false,
+      error: message,
+    };
+  }
+  if (timeoutId !== null) {
+    clearTimeout(timeoutId);
+  }
 
   const parsed = await parseJsonBody<ApiResponse<TResponse>>(response);
 

@@ -3,7 +3,6 @@ import { CARD_LIBRARY, FACTION_CARD_IDS, NEUTRAL_UTILITY_CARD_IDS, getCatalogCar
 import {
   isJudgeCorruptSpecialistCard,
   isJudgePositiveSpecialistCard,
-  isStrictBackOnly,
 } from "../../shared/placement";
 
 export const DEFAULT_LEADER_HP = 30;
@@ -109,11 +108,15 @@ function reduceTopDeckStreaks(deck: string[], seed: number, topWindow: number, m
 export function buildDeck(seed: number, faction: FactionId): string[] {
   const rng = createRng(seed ^ 0x17a9d);
   const factionPool = FACTION_CARD_IDS[faction] ?? FACTION_CARD_IDS[DEFAULT_FACTION];
-  const neutralUtilityPool = NEUTRAL_UTILITY_CARD_IDS;
+  const factionOnlySimDecks = process.env.COC_SIM_FACTION_ONLY === "1";
+  const neutralUtilityPool = factionOnlySimDecks ? [] : NEUTRAL_UTILITY_CARD_IDS;
   const copies = new Map<string, number>();
 
-  const factionCards = pickCardsWithCap(factionPool, FACTION_DECK_COUNT, copies, rng);
-  const neutralUtilityCards = pickCardsWithCap(neutralUtilityPool, NEUTRAL_UTILITY_DECK_COUNT, copies, rng);
+  const factionDeckCount = factionOnlySimDecks ? DECK_SIZE : FACTION_DECK_COUNT;
+  const neutralUtilityDeckCount = factionOnlySimDecks ? 0 : NEUTRAL_UTILITY_DECK_COUNT;
+
+  const factionCards = pickCardsWithCap(factionPool, factionDeckCount, copies, rng);
+  const neutralUtilityCards = pickCardsWithCap(neutralUtilityPool, neutralUtilityDeckCount, copies, rng);
   const cards = [...factionCards, ...neutralUtilityCards];
 
   if (cards.length < DECK_SIZE) {
@@ -139,7 +142,7 @@ export function canPlaceCardInLane(cardId: string, lane: "front" | "back", col?:
   if (card.traits.includes("taunt") || card.traits.includes("front_only")) {
     baseAllowed = lane === "front";
   } else if (card.traits.includes("back_only")) {
-    baseAllowed = isStrictBackOnly(cardId) ? lane === "back" : true;
+    baseAllowed = lane === "back";
   }
 
   if (baseAllowed) {

@@ -36,6 +36,10 @@
       "weekly-rollover": {
         "endpoint": "/internal/cron/weekly-rollover",
         "cron": "0 6 * * 0"
+      },
+      "weekly-intro-comment": {
+        "endpoint": "/internal/cron/weekly-intro-comment",
+        "cron": "* * * * *"
       }
     }
   },

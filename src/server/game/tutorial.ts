@@ -450,7 +450,7 @@ const JUDGE_DEPENDENCIES_SCRIPT: readonly TutorialScriptStep[] = [
   {
     id: "blue-vs-green",
     title: "Blue Slot Attack Rule",
-    body: "Blue-slot specialists can attack only enemy Green Judge slot units.",
+    body: "Blue-slot specialists pressure enemy Green Judge slot units, and they can also attack the enemy leader if no taunt is present.",
     actionHint: "Select Grey Pool Fixer and attack enemy Court Liaison in enemy Green slot.",
     requiresAck: true,
     coachAnchor: { kind: "slot", side: "enemy", lane: "front", col: JUDGE_COL },
@@ -464,7 +464,7 @@ const JUDGE_DEPENDENCIES_SCRIPT: readonly TutorialScriptStep[] = [
   {
     id: "blue-rule-explain",
     title: "Blue Target Restriction",
-    body: "Blue slot unit cannot hit leader/backline/events. It can only attack enemy Green Judge slot units. Green slot units keep normal attack options plus Judge petition.",
+    body: "Blue slot units cannot attack regular board units or events, but they can attack enemy Green Judge slot units and may hit the leader if no taunt is present. Green slot units keep normal attack options plus Judge petition.",
     actionHint: "Tap 'I understand' and use Green petition.",
     requiresAck: true,
   },
@@ -658,6 +658,14 @@ function scenarioConfig(scenarioId: TutorialScenarioId): TutorialScenarioConfig 
 }
 
 const TUTORIAL_ALLOWED_FACTIONS = new Set(["retail_mob", "neutral", "utility"]);
+
+export function getTutorialScriptStepCopy(stepId: string): { title: string; body: string } | null {
+  const step = [...CORE_SCRIPT, ...JUDGE_DEPENDENCIES_SCRIPT].find((one) => one.id === stepId);
+  if (!step) {
+    return null;
+  }
+  return { title: step.title, body: step.body };
+}
 
 function isAllowedTutorialCard(cardId: string): boolean {
   try {

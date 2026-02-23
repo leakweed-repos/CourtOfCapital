@@ -15,11 +15,10 @@ import {
   type MatchActionResult,
   type MatchState,
   type FactionId,
-  type PlayerSide,
   type StartMatchInput,
 } from "../../shared/game";
 import { DEFAULT_FACTION } from "../game/models";
-import { createInitialMatch, endTurn, playCard, applyMulligan, attack, repositionJudgeSpecialist, repayNakedShort, sideForUser, tickTimeouts } from "../game/engine";
+import { createInitialMatch, endTurn, playCard, applyMulligan, attack, repositionJudgeSpecialist, repayNakedShort, sideForUser, tickTimeoutsWithMeta } from "../game/engine";
 import { runAiUntilHumanTurn } from "../game/ai";
 import {
   acknowledgeTutorialStep,
@@ -37,23 +36,43 @@ import {
   getLeaderboardTop,
   getMatch,
   getPvpLobby,
-  incrementWeekMatchCount,
   indexPvpLobbyForUser,
   indexMatchForUser,
+  isLockBusyError,
   listUnlockedFactionsForUser,
   listUserPvpLobbyIds,
   listPendingInvites,
   listUserMatchIds,
-  recordUserOutcome,
   unlockFactionForUser,
   savePvpLobby,
   saveInvite,
   saveMatch,
   deletePvpLobby,
   updateInvite,
+  withLock,
   type RedisLike,
-  type LeaderboardBucket,
 } from "../game/storage";
+import { guardInviteCreate, markInviteCreateCooldown } from "../core/invite-policy";
+import { getArchivedWeekReadOnlyError } from "../core/match-week";
+import { shouldPersistMatchState } from "../core/match-persist";
+import { finalizeMatchResultOnce } from "../core/match-results";
+import {
+  parseAiStartBody,
+  parseAttackBody,
+  parseCleanupStartBody,
+  parseEndTurnBody,
+  parseInviteAcceptBody,
+  parseInviteCreateBody,
+  parseLobbyIdBody,
+  parseMatchIdBody,
+  parseMulliganBody,
+  parsePlayBody,
+  parsePvpLobbyStartBody,
+  parseRepositionJudgeBody,
+  parseRepayNakedShortBody,
+  parseTutorialStartBody,
+  type ParseResult,
+} from "./api-body";
 import { resolveWeeklyPost, validateWeekOpen } from "../core/post";
 
 interface ErrorResponse {
@@ -63,7 +82,7 @@ interface ErrorResponse {
 
 const storageRedis = createRedisLike(redis);
 
-type ApiStatus = 400 | 401 | 403 | 404 | 409 | 500;
+type ApiStatus = 400 | 401 | 403 | 404 | 409 | 429 | 500;
 
 function fail(c: Context, error: string, status: number = 400) {
   return c.json<ErrorResponse>({ ok: false, error }, status as ApiStatus);
@@ -77,6 +96,23 @@ function ok<T>(c: Context, data: T) {
   return c.json({ ok: true as const, data });
 }
 
+async function readJsonValidated<T>(
+  c: Context,
+  parser: (raw: unknown) => ParseResult<T>,
+): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    return { ok: false, response: fail(c, "Invalid JSON body.", 400) };
+  }
+  const parsed = parser(raw);
+  if (!parsed.ok) {
+    return { ok: false, response: fail(c, parsed.error, 400) };
+  }
+  return { ok: true, value: parsed.value };
+}
+
 function aiLevelFromMatch(match: MatchState): 1 | 2 | 3 | undefined {
   if (match.players.A.isBot) {
     return match.players.A.botLevel;
@@ -85,19 +121,6 @@ function aiLevelFromMatch(match: MatchState): 1 | 2 | 3 | undefined {
     return match.players.B.botLevel;
   }
   return undefined;
-}
-
-function leaderboardBucketForMatch(match: MatchState): LeaderboardBucket | null {
-  if (match.mode === "pvp") {
-    return "pvp";
-  }
-  if (match.mode !== "pve") {
-    return null;
-  }
-  const level = aiLevelFromMatch(match) ?? 1;
-  if (level === 1) return "pve_l1";
-  if (level === 2) return "pve_l2";
-  return "pve_l3";
 }
 
 function toLobbyMatchSummary(match: MatchState): LobbyMatchSummary {
@@ -185,19 +208,59 @@ async function finalizeIfFinished(redisLike: RedisLike, wasFinished: boolean, ma
   if (match.mode === "tutorial" || match.mode === "sandbox") {
     return;
   }
+  await finalizeMatchResultOnce(redisLike, match);
+}
 
-  const winner = match.players[match.winnerSide];
-  const loser = match.players[opponentOf(match.winnerSide)];
-  const bucket = leaderboardBucketForMatch(match);
+function matchLockName(matchId: string): string {
+  return `match:${matchId}`;
+}
 
-  if (!winner.isBot) {
-    await recordUserOutcome(redisLike, match.weekId, { userId: winner.userId, username: winner.username }, true, bucket ?? "all");
+function pvpLobbyLockName(lobbyId: string): string {
+  return `pvp-lobby:${lobbyId}`;
+}
+
+const MATCH_LOCK_OPTIONS = {
+  ttlSeconds: 20,
+  waitMs: 5_000,
+  retryMs: 25,
+} as const;
+
+const PVP_LOBBY_LOCK_OPTIONS = {
+  ttlSeconds: 20,
+  waitMs: 5_000,
+  retryMs: 25,
+} as const;
+
+async function withMatchLock<T>(matchId: string, fn: () => Promise<T>): Promise<T> {
+  return withLock(storageRedis, matchLockName(matchId), MATCH_LOCK_OPTIONS, fn);
+}
+
+async function withPvpLobbyLock<T>(lobbyId: string, fn: () => Promise<T>): Promise<T> {
+  return withLock(storageRedis, pvpLobbyLockName(lobbyId), PVP_LOBBY_LOCK_OPTIONS, fn);
+}
+
+function failLockBusy(c: Context, error: unknown) {
+  if (!isLockBusyError(error)) {
+    return null;
   }
-  if (!loser.isBot) {
-    await recordUserOutcome(redisLike, match.weekId, { userId: loser.userId, username: loser.username }, false, bucket ?? "all");
-  }
+  return fail(c, "Request conflict: state is being updated. Please retry.", 409);
+}
 
-  await incrementWeekMatchCount(redisLike, match.weekId);
+async function ensureMatchWeekWritable(redisLike: RedisLike, match: MatchState): Promise<null | string> {
+  return getArchivedWeekReadOnlyError(redisLike, match);
+}
+
+async function saveMatchIfChanged(
+  redisLike: RedisLike,
+  match: MatchState,
+  previousUpdatedAt: number,
+  options?: { force?: boolean },
+): Promise<boolean> {
+  const changed = shouldPersistMatchState(previousUpdatedAt, match, options);
+  if (changed) {
+    await saveMatch(redisLike, match);
+  }
+  return changed;
 }
 
 async function loadMatch(matchId: string): Promise<{ ok: true; match: MatchState } | { ok: false; status: number; error: string }> {
@@ -261,13 +324,25 @@ async function closeActiveSandboxMatchesForUser(userId: string, now: number): Pr
 }
 
 async function notifyInvite(invite: InviteState): Promise<void> {
+  const subject = "Court of Capital invite";
+  const text = `You have a Court of Capital invite from u/${invite.inviterUsername} for this week's Court. Open the weekly post and tap Accept to join the match.`;
   try {
-    const post = await reddit.getPostById(invite.postId as `t3_${string}`);
-    await post.addComment({
-      text: `u/${invite.targetUsername} you have a Court of Capital invite from u/${invite.inviterUsername}. Open the post and Accept.`,
+    await reddit.sendPrivateMessageAsSubreddit({
+      fromSubredditName: context.subredditName,
+      to: invite.targetUsername,
+      subject,
+      text,
     });
   } catch (error) {
-    console.error("Invite notification failed:", error);
+    try {
+      await reddit.sendPrivateMessage({
+        to: invite.targetUsername,
+        subject,
+        text,
+      });
+    } catch (fallbackError) {
+      console.error("Invite private-message notification failed:", fallbackError);
+    }
   }
 }
 
@@ -275,7 +350,7 @@ function isAwaitingLobbyTarget(lobby: PvpLobbyState): boolean {
   return !lobby.targetUserId && !lobby.matchId && lobby.status !== "cancelled";
 }
 
-async function expireLobbyIfTimedOut(lobby: PvpLobbyState, now: number): Promise<boolean> {
+async function expireLobbyIfTimedOutUnlocked(lobby: PvpLobbyState, now: number): Promise<boolean> {
   if (!isAwaitingLobbyTarget(lobby)) {
     return false;
   }
@@ -290,6 +365,30 @@ async function expireLobbyIfTimedOut(lobby: PvpLobbyState, now: number): Promise
   }
   await deletePvpLobby(storageRedis, lobby);
   return true;
+}
+
+async function expireLobbyIfTimedOut(
+  lobby: PvpLobbyState,
+  now: number,
+  options?: { alreadyLocked?: boolean },
+): Promise<boolean> {
+  if (options?.alreadyLocked) {
+    return expireLobbyIfTimedOutUnlocked(lobby, now);
+  }
+  try {
+    return await withPvpLobbyLock(lobby.id, async () => {
+      const fresh = await getPvpLobby(storageRedis, lobby.id);
+      if (!fresh) {
+        return true;
+      }
+      return expireLobbyIfTimedOutUnlocked(fresh, now);
+    });
+  } catch (error) {
+    if (isLockBusyError(error)) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 export const api = new Hono();
@@ -309,6 +408,7 @@ api.post("/lobby", async (c) => {
   const userMatchIds = await listUserMatchIds(storageRedis, actor.userId);
   const userPvpLobbyIds = await listUserPvpLobbyIds(storageRedis, actor.userId);
   const unlockedFactions = await listUnlockedFactionsForUser(storageRedis, actor.userId);
+  const activeWeekId = (await getCurrentWeekId(storageRedis)) ?? weekState.weekId;
   const now = nowTs();
 
   const quickPlayMatchSummaries: LobbyMatchSummary[] = [];
@@ -357,6 +457,9 @@ api.post("/lobby", async (c) => {
     }
 
     if (one.status !== "finished") {
+      if (one.weekId !== activeWeekId) {
+        continue;
+      }
       const summary = toLobbyMatchSummary(one);
       if (one.mode === "pvp") {
         pvpMatchSummaries.push(summary);
@@ -412,6 +515,7 @@ api.post("/lobby", async (c) => {
     snapshot: {
       weekId: weekState.weekId,
       postId: weekState.postId,
+      isActiveWeek: weekState.isActiveWeek,
       unlockedFactions: unlockedFactions.length > 0 ? unlockedFactions : ["retail_mob"],
       pendingInvites: invites,
       pvpLobbies,
@@ -439,10 +543,11 @@ api.post("/match/ai", async (c) => {
     return fail(c, weekState.error, weekState.status);
   }
 
-  const body = (await c.req.json()) as { level: 1 | 2 | 3; faction?: FactionId };
-  if (![1, 2, 3].includes(body.level)) {
-    return fail(c, "Invalid AI level.");
+  const parsedBody = await readJsonValidated(c, parseAiStartBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
 
   const now = nowTs();
   const initInput: StartMatchInput = {
@@ -488,7 +593,11 @@ api.post("/tutorial/start", async (c) => {
     return fail(c, weekState.error, weekState.status);
   }
 
-  const body = (await c.req.json()) as { scenarioId?: TutorialScenarioId; faction?: FactionId };
+  const parsedBody = await readJsonValidated(c, parseTutorialStartBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
+  }
+  const body = parsedBody.value;
   const now = nowTs();
   const scenarioId: TutorialScenarioId = body.scenarioId ?? "core_basics_v1";
   await closeActiveTutorialMatchesForUser(actor.userId, now);
@@ -535,7 +644,11 @@ api.post("/tutorial/cleanup/start", async (c) => {
     return fail(c, weekState.error, weekState.status);
   }
 
-  const body = (await c.req.json()) as { faction?: FactionId };
+  const parsedBody = await readJsonValidated(c, parseCleanupStartBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
+  }
+  const body = parsedBody.value;
   const now = nowTs();
   await closeActiveSandboxMatchesForUser(actor.userId, now);
 
@@ -581,8 +694,12 @@ api.post("/match/invite", async (c) => {
     return fail(c, weekState.error, weekState.status);
   }
 
-  const body = (await c.req.json()) as { targetUsername?: string; faction?: FactionId };
-  const targetUsername = normalizeUsername(body.targetUsername ?? "");
+  const parsedBody = await readJsonValidated(c, parseInviteCreateBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
+  }
+  const body = parsedBody.value;
+  const targetUsername = normalizeUsername(body.targetUsername);
   if (!targetUsername) {
     return fail(c, "Target username is required.");
   }
@@ -590,43 +707,69 @@ api.post("/match/invite", async (c) => {
     return fail(c, "You cannot invite yourself.");
   }
 
-  const now = nowTs();
-  const lobbyId = uniqueId("pvp_lobby", stableHash(`${actor.userId}:${targetUsername}:${now}`), 1);
-  const invite: InviteState = {
-    id: uniqueId("invite", stableHash(`${actor.userId}:${targetUsername}:${now}`), 1),
-    weekId: weekState.weekId,
-    postId: weekState.postId,
-    inviterUserId: actor.userId,
-    inviterUsername: actor.username,
-    inviterFaction: body.faction ?? DEFAULT_FACTION,
-    targetUsername,
-    status: "pending",
-    createdAt: now,
-    lobbyId,
-  };
+  const inviteCreateLock = `invite-create:${actor.userId}`;
+  try {
+    return await withLock(storageRedis, inviteCreateLock, { ttlSeconds: 10, waitMs: 5_000, retryMs: 25 }, async () => {
+      const now = nowTs();
+      const guard = await guardInviteCreate(storageRedis, {
+        inviterUserId: actor.userId,
+        targetUsername,
+        weekId: weekState.weekId,
+        postId: weekState.postId,
+        now,
+      });
+      if (!guard.ok) {
+        if (guard.kind === "duplicate") {
+          return fail(c, "Invite already pending", 409);
+        }
+        if (guard.kind === "cooldown") {
+          const secondsLeft = Math.max(1, Math.ceil((guard.cooldownUntil - now) / 1000));
+          return fail(c, `Invite cooldown active (${secondsLeft}s remaining)`, 429);
+        }
+        return fail(c, "Invite rate limit exceeded", 429);
+      }
 
-  const lobby: PvpLobbyState = {
-    id: lobbyId,
-    inviteId: invite.id,
-    weekId: weekState.weekId,
-    postId: weekState.postId,
-    inviterUserId: actor.userId,
-    inviterUsername: actor.username,
-    inviterFaction: body.faction ?? DEFAULT_FACTION,
-    targetUsername,
-    inviterReady: false,
-    targetReady: false,
-    status: "waiting",
-    createdAt: now,
-    updatedAt: now,
-  };
+      const lobbyId = uniqueId("pvp_lobby", stableHash(`${actor.userId}:${targetUsername}:${now}`), 1);
+      const invite: InviteState = {
+        id: uniqueId("invite", stableHash(`${actor.userId}:${targetUsername}:${now}`), 1),
+        weekId: weekState.weekId,
+        postId: weekState.postId,
+        inviterUserId: actor.userId,
+        inviterUsername: actor.username,
+        inviterFaction: body.faction ?? DEFAULT_FACTION,
+        targetUsername,
+        status: "pending",
+        createdAt: now,
+        lobbyId,
+      };
 
-  await saveInvite(storageRedis, invite);
-  await savePvpLobby(storageRedis, lobby);
-  await indexPvpLobbyForUser(storageRedis, actor.userId, lobby.id);
-  await notifyInvite(invite);
+      const lobby: PvpLobbyState = {
+        id: lobbyId,
+        inviteId: invite.id,
+        weekId: weekState.weekId,
+        postId: weekState.postId,
+        inviterUserId: actor.userId,
+        inviterUsername: actor.username,
+        inviterFaction: body.faction ?? DEFAULT_FACTION,
+        targetUsername,
+        inviterReady: false,
+        targetReady: false,
+        status: "waiting",
+        createdAt: now,
+        updatedAt: now,
+      };
 
-  return ok(c, { invite, lobby });
+      await saveInvite(storageRedis, invite);
+      await savePvpLobby(storageRedis, lobby);
+      await indexPvpLobbyForUser(storageRedis, actor.userId, lobby.id);
+      await markInviteCreateCooldown(storageRedis, actor.userId, now);
+      await notifyInvite(invite);
+
+      return ok(c, { invite, lobby });
+    });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to create invite.", 500);
+  }
 });
 
 api.post("/invite/accept", async (c) => {
@@ -640,7 +783,11 @@ api.post("/invite/accept", async (c) => {
     return fail(c, weekState.error, weekState.status);
   }
 
-  const body = (await c.req.json()) as { inviteId: string; faction?: FactionId };
+  const parsedBody = await readJsonValidated(c, parseInviteAcceptBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
+  }
+  const body = parsedBody.value;
   const invite = await getInvite(storageRedis, body.inviteId);
   if (!invite) {
     return fail(c, "Invite not found.", 404);
@@ -660,44 +807,66 @@ api.post("/invite/accept", async (c) => {
   if (!invite.lobbyId) {
     return fail(c, "Invite has no lobby metadata.", 409);
   }
+  try {
+    return await withPvpLobbyLock(invite.lobbyId, async () => {
+      const latestInvite = await getInvite(storageRedis, body.inviteId);
+      if (!latestInvite) {
+        return fail(c, "Invite not found.", 404);
+      }
+      if (latestInvite.status !== "pending" && latestInvite.status !== "accepted") {
+        return fail(c, "Invite is not active.");
+      }
+      if (latestInvite.targetUsername !== actor.username) {
+        return fail(c, "Invite does not belong to this user.", 403);
+      }
+      if (latestInvite.weekId !== weekState.weekId || latestInvite.postId !== weekState.postId) {
+        return fail(c, "Invite belongs to an archived week/post.", 409);
+      }
+      if (!latestInvite.lobbyId) {
+        return fail(c, "Invite has no lobby metadata.", 409);
+      }
 
-  const lobby = await getPvpLobby(storageRedis, invite.lobbyId);
-  if (!lobby) {
-    return fail(c, "Lobby not found.", 404);
-  }
-  if (await expireLobbyIfTimedOut(lobby, nowTs())) {
-    return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
-  }
-  if (lobby.status === "cancelled") {
-    return fail(c, "Lobby has been dismantled.", 409);
-  }
-  if (lobby.matchId) {
-    return fail(c, "Lobby already started.", 409);
-  }
-  if (lobby.targetUsername !== actor.username) {
-    return fail(c, "Lobby target mismatch.", 403);
-  }
-  if (lobby.targetUserId && lobby.targetUserId !== actor.userId) {
-    return fail(c, "Lobby already joined by another user.", 409);
-  }
+      const lobby = await getPvpLobby(storageRedis, latestInvite.lobbyId);
+      if (!lobby) {
+        return fail(c, "Lobby not found.", 404);
+      }
+      if (await expireLobbyIfTimedOut(lobby, nowTs(), { alreadyLocked: true })) {
+        return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
+      }
+      if (lobby.status === "cancelled") {
+        return fail(c, "Lobby has been dismantled.", 409);
+      }
+      if (lobby.matchId) {
+        return fail(c, "Lobby already started.", 409);
+      }
+      if (lobby.targetUsername !== actor.username) {
+        return fail(c, "Lobby target mismatch.", 403);
+      }
+      if (lobby.targetUserId && lobby.targetUserId !== actor.userId) {
+        return fail(c, "Lobby already joined by another user.", 409);
+      }
 
-  const now = nowTs();
-  lobby.targetUserId = actor.userId;
-  lobby.targetFaction = body.faction ?? lobby.targetFaction ?? DEFAULT_FACTION;
-  lobby.status = "waiting";
-  lobby.updatedAt = now;
+      const now = nowTs();
+      lobby.targetUserId = actor.userId;
+      lobby.targetFaction = body.faction ?? lobby.targetFaction ?? DEFAULT_FACTION;
+      lobby.status = "waiting";
+      lobby.updatedAt = now;
 
-  invite.status = "accepted";
-  invite.acceptedAt = invite.acceptedAt ?? now;
+      latestInvite.status = "accepted";
+      latestInvite.acceptedAt = latestInvite.acceptedAt ?? now;
 
-  await updateInvite(storageRedis, invite);
-  await savePvpLobby(storageRedis, lobby);
-  await indexPvpLobbyForUser(storageRedis, actor.userId, lobby.id);
+      await updateInvite(storageRedis, latestInvite);
+      await savePvpLobby(storageRedis, lobby);
+      await indexPvpLobbyForUser(storageRedis, actor.userId, lobby.id);
 
-  return ok(c, {
-    invite,
-    lobby,
-  });
+      return ok(c, {
+        invite: latestInvite,
+        lobby,
+      });
+    });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to accept invite.", 500);
+  }
 });
 
 api.post("/pvp/lobby/get", async (c) => {
@@ -706,10 +875,11 @@ api.post("/pvp/lobby/get", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as { lobbyId?: string };
-  if (!body.lobbyId) {
-    return fail(c, "Lobby id is required.");
+  const parsedBody = await readJsonValidated(c, parseLobbyIdBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
 
   const lobby = await getPvpLobby(storageRedis, body.lobbyId);
   if (!lobby) {
@@ -741,98 +911,106 @@ api.post("/pvp/lobby/start", async (c) => {
     return fail(c, weekState.error, weekState.status);
   }
 
-  const body = (await c.req.json()) as { lobbyId?: string; faction?: FactionId };
-  if (!body.lobbyId) {
-    return fail(c, "Lobby id is required.");
+  const parsedBody = await readJsonValidated(c, parsePvpLobbyStartBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
+  const lobbyId = body.lobbyId;
 
-  const lobby = await getPvpLobby(storageRedis, body.lobbyId);
-  if (!lobby) {
-    return fail(c, "Lobby not found.", 404);
-  }
-  if (await expireLobbyIfTimedOut(lobby, nowTs())) {
-    return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
-  }
-  if (lobby.status === "cancelled") {
-    return fail(c, "Lobby has been dismantled.", 409);
-  }
-  if (lobby.weekId !== weekState.weekId || lobby.postId !== weekState.postId) {
-    return fail(c, "Lobby belongs to an archived week/post.", 409);
-  }
+  try {
+    return await withPvpLobbyLock(lobbyId, async () => {
+      const lobby = await getPvpLobby(storageRedis, lobbyId);
+      if (!lobby) {
+        return fail(c, "Lobby not found.", 404);
+      }
+      if (await expireLobbyIfTimedOut(lobby, nowTs(), { alreadyLocked: true })) {
+        return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
+      }
+      if (lobby.status === "cancelled") {
+        return fail(c, "Lobby has been dismantled.", 409);
+      }
+      if (lobby.weekId !== weekState.weekId || lobby.postId !== weekState.postId) {
+        return fail(c, "Lobby belongs to an archived week/post.", 409);
+      }
 
-  const isInviter = lobby.inviterUserId === actor.userId;
-  const isTarget = lobby.targetUserId === actor.userId;
-  if (!isInviter && !isTarget) {
-    return fail(c, "You are not a member of this lobby.", 403);
-  }
+      const isInviter = lobby.inviterUserId === actor.userId;
+      const isTarget = lobby.targetUserId === actor.userId;
+      if (!isInviter && !isTarget) {
+        return fail(c, "You are not a member of this lobby.", 403);
+      }
 
-  if (!lobby.targetUserId) {
-    return fail(c, "Opponent has not joined this lobby yet.", 409);
-  }
+      if (!lobby.targetUserId) {
+        return fail(c, "Opponent has not joined this lobby yet.", 409);
+      }
 
-  const now = nowTs();
-  if (isInviter) {
-    lobby.inviterFaction = body.faction ?? lobby.inviterFaction;
-    lobby.inviterReady = true;
-  } else {
-    lobby.targetFaction = body.faction ?? lobby.targetFaction ?? DEFAULT_FACTION;
-    lobby.targetReady = true;
-  }
+      const now = nowTs();
+      if (isInviter) {
+        lobby.inviterFaction = body.faction ?? lobby.inviterFaction;
+        lobby.inviterReady = true;
+      } else {
+        lobby.targetFaction = body.faction ?? lobby.targetFaction ?? DEFAULT_FACTION;
+        lobby.targetReady = true;
+      }
 
-  if (!lobby.matchId && lobby.inviterReady && lobby.targetReady) {
-    const match = createInitialMatch(
-      {
-        weekId: lobby.weekId,
-        postId: lobby.postId,
-        mode: "pvp",
-        playerA: {
-          userId: lobby.inviterUserId,
-          username: lobby.inviterUsername,
-          faction: lobby.inviterFaction,
-        },
-        playerB: {
-          userId: lobby.targetUserId,
-          username: lobby.targetUsername,
-          faction: lobby.targetFaction ?? DEFAULT_FACTION,
-          isBot: false,
-        },
-        seed: freshMatchSeed(`${lobby.id}:${lobby.targetUserId}:${now}`),
-      },
-      now,
-    );
-    lobby.matchId = match.id;
-    lobby.status = "started";
-    lobby.updatedAt = now;
+      if (!lobby.matchId && lobby.inviterReady && lobby.targetReady) {
+        const match = createInitialMatch(
+          {
+            weekId: lobby.weekId,
+            postId: lobby.postId,
+            mode: "pvp",
+            playerA: {
+              userId: lobby.inviterUserId,
+              username: lobby.inviterUsername,
+              faction: lobby.inviterFaction,
+            },
+            playerB: {
+              userId: lobby.targetUserId,
+              username: lobby.targetUsername,
+              faction: lobby.targetFaction ?? DEFAULT_FACTION,
+              isBot: false,
+            },
+            seed: freshMatchSeed(`${lobby.id}:${lobby.targetUserId}:${now}`),
+          },
+          now,
+        );
+        lobby.matchId = match.id;
+        lobby.status = "started";
+        lobby.updatedAt = now;
 
-    await saveMatch(storageRedis, match);
-    await indexMatchForUser(storageRedis, lobby.inviterUserId, match.id);
-    await indexMatchForUser(storageRedis, lobby.targetUserId, match.id);
-    await unlockFactionForUser(storageRedis, lobby.inviterUserId, match.players.A.faction);
-    await unlockFactionForUser(storageRedis, lobby.targetUserId, match.players.B.faction);
+        await saveMatch(storageRedis, match);
+        await indexMatchForUser(storageRedis, lobby.inviterUserId, match.id);
+        await indexMatchForUser(storageRedis, lobby.targetUserId, match.id);
+        await unlockFactionForUser(storageRedis, lobby.inviterUserId, match.players.A.faction);
+        await unlockFactionForUser(storageRedis, lobby.targetUserId, match.players.B.faction);
 
-    const invite = await getInvite(storageRedis, lobby.inviteId);
-    if (invite) {
-      invite.status = "accepted";
-      invite.acceptedAt = invite.acceptedAt ?? now;
-      invite.matchId = match.id;
-      await updateInvite(storageRedis, invite);
-    }
+        const invite = await getInvite(storageRedis, lobby.inviteId);
+        if (invite) {
+          invite.status = "accepted";
+          invite.acceptedAt = invite.acceptedAt ?? now;
+          invite.matchId = match.id;
+          await updateInvite(storageRedis, invite);
+        }
 
-    await savePvpLobby(storageRedis, lobby);
+        await savePvpLobby(storageRedis, lobby);
 
-    return ok(c, {
-      lobby,
-      result: {
-        ok: true,
-        match,
-      } satisfies MatchActionResult,
+        return ok(c, {
+          lobby,
+          result: {
+            ok: true,
+            match,
+          } satisfies MatchActionResult,
+        });
+      }
+
+      lobby.status = "ready";
+      lobby.updatedAt = now;
+      await savePvpLobby(storageRedis, lobby);
+      return ok(c, { lobby });
     });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to update PvP lobby.", 500);
   }
-
-  lobby.status = "ready";
-  lobby.updatedAt = now;
-  await savePvpLobby(storageRedis, lobby);
-  return ok(c, { lobby });
 });
 
 api.post("/pvp/lobby/dismantle", async (c) => {
@@ -841,35 +1019,43 @@ api.post("/pvp/lobby/dismantle", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as { lobbyId?: string };
-  if (!body.lobbyId) {
-    return fail(c, "Lobby id is required.");
+  const parsedBody = await readJsonValidated(c, parseLobbyIdBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
+  const lobbyId = body.lobbyId;
 
-  const lobby = await getPvpLobby(storageRedis, body.lobbyId);
-  if (!lobby) {
-    return fail(c, "Lobby not found.", 404);
-  }
-  if (await expireLobbyIfTimedOut(lobby, nowTs())) {
-    return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
-  }
-  if (lobby.inviterUserId !== actor.userId) {
-    return fail(c, "Only inviter can dismantle this battle.", 403);
-  }
-  if (lobby.matchId) {
-    return fail(c, "Lobby already started, dismantle is no longer available.", 409);
-  }
+  try {
+    return await withPvpLobbyLock(lobbyId, async () => {
+      const lobby = await getPvpLobby(storageRedis, lobbyId);
+      if (!lobby) {
+        return fail(c, "Lobby not found.", 404);
+      }
+      if (await expireLobbyIfTimedOut(lobby, nowTs(), { alreadyLocked: true })) {
+        return fail(c, "Lobby expired after 15 minutes without opponent response.", 409);
+      }
+      if (lobby.inviterUserId !== actor.userId) {
+        return fail(c, "Only inviter can dismantle this battle.", 403);
+      }
+      if (lobby.matchId) {
+        return fail(c, "Lobby already started, dismantle is no longer available.", 409);
+      }
 
-  lobby.status = "cancelled";
-  lobby.updatedAt = nowTs();
-  const invite = await getInvite(storageRedis, lobby.inviteId);
-  if (invite) {
-    invite.status = "cancelled";
-    await updateInvite(storageRedis, invite);
-  }
-  await deletePvpLobby(storageRedis, lobby);
+      lobby.status = "cancelled";
+      lobby.updatedAt = nowTs();
+      const invite = await getInvite(storageRedis, lobby.inviteId);
+      if (invite) {
+        invite.status = "cancelled";
+        await updateInvite(storageRedis, invite);
+      }
+      await deletePvpLobby(storageRedis, lobby);
 
-  return ok(c, { success: true });
+      return ok(c, { success: true });
+    });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to dismantle PvP lobby.", 500);
+  }
 });
 
 api.post("/match/get", async (c) => {
@@ -878,27 +1064,43 @@ api.post("/match/get", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as { matchId: string };
-  const loaded = await loadMatch(body.matchId);
-  if (!loaded.ok) {
-    return fail(c, loaded.error, loaded.status);
+  const parsedBody = await readJsonValidated(c, parseMatchIdBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
+  try {
+    return await withMatchLock(body.matchId, async () => {
+      const loaded = await loadMatch(body.matchId);
+      if (!loaded.ok) {
+        return fail(c, loaded.error, loaded.status);
+      }
 
-  if (!sideForUser(loaded.match, actor.userId)) {
-    return fail(c, "You are not a player in this match.", 403);
+      if (!sideForUser(loaded.match, actor.userId)) {
+        return fail(c, "You are not a player in this match.", 403);
+      }
+      const archivedError = await ensureMatchWeekWritable(storageRedis, loaded.match);
+      if (archivedError) {
+        return fail(c, archivedError, 409);
+      }
+
+      const wasFinished = loaded.match.status === "finished";
+      const loadedUpdatedAt = loaded.match.updatedAt;
+      const ticked = tickTimeoutsWithMeta(loaded.match);
+      let next = ticked.match;
+      const repaired = repairTutorialIfNeeded(next);
+      if (repaired.repaired) {
+        next = repaired.match;
+      }
+      next = runAiUntilHumanTurn(next);
+      await finalizeIfFinished(storageRedis, wasFinished, next);
+      await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt, { force: repaired.repaired });
+
+      return ok(c, { match: next });
+    });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to load match state.", 500);
   }
-
-  const wasFinished = loaded.match.status === "finished";
-  let next = tickTimeouts(loaded.match);
-  const repaired = repairTutorialIfNeeded(next);
-  if (repaired.repaired) {
-    next = repaired.match;
-  }
-  next = runAiUntilHumanTurn(next);
-  await finalizeIfFinished(storageRedis, wasFinished, next);
-  await saveMatch(storageRedis, next);
-
-  return ok(c, { match: next });
 });
 
 api.post("/tutorial/acknowledge", async (c) => {
@@ -907,28 +1109,44 @@ api.post("/tutorial/acknowledge", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as { matchId: string };
-  const loaded = await loadMatch(body.matchId);
-  if (!loaded.ok) {
-    return fail(c, loaded.error, loaded.status);
+  const parsedBody = await readJsonValidated(c, parseMatchIdBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
-  const side = sideForUser(loaded.match, actor.userId);
-  if (!side) {
-    return fail(c, "You are not a player in this match.", 403);
+  const body = parsedBody.value;
+  try {
+    return await withMatchLock(body.matchId, async () => {
+      const loaded = await loadMatch(body.matchId);
+      if (!loaded.ok) {
+        return fail(c, loaded.error, loaded.status);
+      }
+      const side = sideForUser(loaded.match, actor.userId);
+      if (!side) {
+        return fail(c, "You are not a player in this match.", 403);
+      }
+      const archivedError = await ensureMatchWeekWritable(storageRedis, loaded.match);
+      if (archivedError) {
+        return fail(c, archivedError, 409);
+      }
+
+      const loadedUpdatedAt = loaded.match.updatedAt;
+      const ticked = tickTimeoutsWithMeta(loaded.match);
+      let next = ticked.match;
+      const result = acknowledgeTutorialStep(next, side);
+      next = result.match;
+      await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
+
+      return ok(c, {
+        result: {
+          ok: result.ok,
+          error: result.error,
+          match: next,
+        } satisfies MatchActionResult,
+      });
+    });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to update tutorial state.", 500);
   }
-
-  let next = tickTimeouts(loaded.match);
-  const result = acknowledgeTutorialStep(next, side);
-  next = result.match;
-  await saveMatch(storageRedis, next);
-
-  return ok(c, {
-    result: {
-      ok: result.ok,
-      error: result.error,
-      match: next,
-    } satisfies MatchActionResult,
-  });
 });
 
 api.post("/tutorial/skip", async (c) => {
@@ -937,26 +1155,41 @@ api.post("/tutorial/skip", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as { matchId: string };
-  const loaded = await loadMatch(body.matchId);
-  if (!loaded.ok) {
-    return fail(c, loaded.error, loaded.status);
+  const parsedBody = await readJsonValidated(c, parseMatchIdBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
-  const side = sideForUser(loaded.match, actor.userId);
-  if (!side) {
-    return fail(c, "You are not a player in this match.", 403);
+  const body = parsedBody.value;
+  try {
+    return await withMatchLock(body.matchId, async () => {
+      const loaded = await loadMatch(body.matchId);
+      if (!loaded.ok) {
+        return fail(c, loaded.error, loaded.status);
+      }
+      const side = sideForUser(loaded.match, actor.userId);
+      if (!side) {
+        return fail(c, "You are not a player in this match.", 403);
+      }
+      const archivedError = await ensureMatchWeekWritable(storageRedis, loaded.match);
+      if (archivedError) {
+        return fail(c, archivedError, 409);
+      }
+
+      const loadedUpdatedAt = loaded.match.updatedAt;
+      const result = skipTutorial(loaded.match, side);
+      await saveMatchIfChanged(storageRedis, result.match, loadedUpdatedAt);
+
+      return ok(c, {
+        result: {
+          ok: result.ok,
+          error: result.error,
+          match: result.match,
+        } satisfies MatchActionResult,
+      });
+    });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to skip tutorial.", 500);
   }
-
-  const result = skipTutorial(loaded.match, side);
-  await saveMatch(storageRedis, result.match);
-
-  return ok(c, {
-    result: {
-      ok: result.ok,
-      error: result.error,
-      match: result.match,
-    } satisfies MatchActionResult,
-  });
 });
 
 api.post("/match/mulligan", async (c) => {
@@ -965,48 +1198,62 @@ api.post("/match/mulligan", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as {
-    matchId: string;
-    action: { side: PlayerSide; replaceIndices: number[] };
-  };
-
-  const loaded = await loadMatch(body.matchId);
-  if (!loaded.ok) {
-    return fail(c, loaded.error, loaded.status);
+  const parsedBody = await readJsonValidated(c, parseMulliganBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
 
-  const wasFinished = loaded.match.status === "finished";
-  const side = sideForUser(loaded.match, actor.userId);
-  if (!side) {
-    return fail(c, "You are not a player in this match.", 403);
-  }
-  if (side !== body.action.side) {
-    return fail(c, "Action side mismatch.", 403);
-  }
+  try {
+    return await withMatchLock(body.matchId, async () => {
+      const loaded = await loadMatch(body.matchId);
+      if (!loaded.ok) {
+        return fail(c, loaded.error, loaded.status);
+      }
 
-  let next = tickTimeouts(loaded.match);
-  if (next.mode === "tutorial") {
-    return ok(c, {
-      result: {
-        ok: false,
-        error: "Tutorial uses scripted flow and does not include mulligan.",
-        match: next,
-      } satisfies MatchActionResult,
+      const archivedError = await ensureMatchWeekWritable(storageRedis, loaded.match);
+      if (archivedError) {
+        return fail(c, archivedError, 409);
+      }
+
+      const wasFinished = loaded.match.status === "finished";
+      const side = sideForUser(loaded.match, actor.userId);
+      if (!side) {
+        return fail(c, "You are not a player in this match.", 403);
+      }
+      if (side !== body.action.side) {
+        return fail(c, "Action side mismatch.", 403);
+      }
+
+      const loadedUpdatedAt = loaded.match.updatedAt;
+      const ticked = tickTimeoutsWithMeta(loaded.match);
+      let next = ticked.match;
+      if (next.mode === "tutorial") {
+        return ok(c, {
+          result: {
+            ok: false,
+            error: "Tutorial uses scripted flow and does not include mulligan.",
+            match: next,
+          } satisfies MatchActionResult,
+        });
+      }
+      const result = applyMulligan(next, body.action);
+      next = runAiUntilHumanTurn(result.match);
+
+      await finalizeIfFinished(storageRedis, wasFinished, next);
+      await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
+
+      return ok(c, {
+        result: {
+          ok: result.ok,
+          error: result.error,
+          match: next,
+        } satisfies MatchActionResult,
+      });
     });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to apply mulligan.", 500);
   }
-  const result = applyMulligan(next, body.action);
-  next = runAiUntilHumanTurn(result.match);
-
-  await finalizeIfFinished(storageRedis, wasFinished, next);
-  await saveMatch(storageRedis, next);
-
-  return ok(c, {
-    result: {
-      ok: result.ok,
-      error: result.error,
-      match: next,
-    } satisfies MatchActionResult,
-  });
 });
 
 api.post("/match/play", async (c) => {
@@ -1015,63 +1262,66 @@ api.post("/match/play", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as {
-    matchId: string;
-    action: {
-      side: PlayerSide;
-      handIndex: number;
-      lane: "front" | "back";
-      col: number;
-      leverage?: 2 | 3 | 4 | 5;
-      target?:
-        | { kind: "ally-unit"; unitId: string }
-        | { kind: "enemy-unit"; unitId: string }
-        | { kind: "ally-leader" }
-        | { kind: "enemy-leader" };
-    };
-  };
-
-  const loaded = await loadMatch(body.matchId);
-  if (!loaded.ok) {
-    return fail(c, loaded.error, loaded.status);
+  const parsedBody = await readJsonValidated(c, parsePlayBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
 
-  const wasFinished = loaded.match.status === "finished";
-  const side = sideForUser(loaded.match, actor.userId);
-  if (!side) {
-    return fail(c, "You are not a player in this match.", 403);
-  }
-  if (side !== body.action.side) {
-    return fail(c, "Action side mismatch.", 403);
-  }
+  try {
+    return await withMatchLock(body.matchId, async () => {
+      const loaded = await loadMatch(body.matchId);
+      if (!loaded.ok) {
+        return fail(c, loaded.error, loaded.status);
+      }
 
-  let next = tickTimeouts(loaded.match);
-  const tutorialValidation = validateTutorialAction(next, side, "play", body.action);
-  if (!tutorialValidation.ok) {
-    return ok(c, {
-      result: {
-        ok: false,
-        error: tutorialValidation.error,
-        match: next,
-      } satisfies MatchActionResult,
+      const archivedError = await ensureMatchWeekWritable(storageRedis, loaded.match);
+      if (archivedError) {
+        return fail(c, archivedError, 409);
+      }
+
+      const wasFinished = loaded.match.status === "finished";
+      const side = sideForUser(loaded.match, actor.userId);
+      if (!side) {
+        return fail(c, "You are not a player in this match.", 403);
+      }
+      if (side !== body.action.side) {
+        return fail(c, "Action side mismatch.", 403);
+      }
+
+      const loadedUpdatedAt = loaded.match.updatedAt;
+      const ticked = tickTimeoutsWithMeta(loaded.match);
+      let next = ticked.match;
+      const tutorialValidation = validateTutorialAction(next, side, "play", body.action);
+      if (!tutorialValidation.ok) {
+        return ok(c, {
+          result: {
+            ok: false,
+            error: tutorialValidation.error,
+            match: next,
+          } satisfies MatchActionResult,
+        });
+      }
+      const result = playCard(next, body.action);
+      if (result.ok) {
+        advanceTutorialAfterAction(result.match, "play");
+      }
+      next = runAiUntilHumanTurn(result.match);
+
+      await finalizeIfFinished(storageRedis, wasFinished, next);
+      await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
+
+      return ok(c, {
+        result: {
+          ok: result.ok,
+          error: result.error,
+          match: next,
+        } satisfies MatchActionResult,
+      });
     });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to play card.", 500);
   }
-  const result = playCard(next, body.action);
-  if (result.ok) {
-    advanceTutorialAfterAction(result.match, "play");
-  }
-  next = runAiUntilHumanTurn(result.match);
-
-  await finalizeIfFinished(storageRedis, wasFinished, next);
-  await saveMatch(storageRedis, next);
-
-  return ok(c, {
-    result: {
-      ok: result.ok,
-      error: result.error,
-      match: next,
-    } satisfies MatchActionResult,
-  });
 });
 
 api.post("/match/attack", async (c) => {
@@ -1080,60 +1330,66 @@ api.post("/match/attack", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as {
-    matchId: string;
-    action: {
-      side: PlayerSide;
-      attackerUnitId: string;
-      target:
-        | { kind: "leader" }
-        | { kind: "judge" }
-        | { kind: "unit"; unitId: string }
-        | { kind: "event"; eventUnitId: string };
-    };
-  };
-
-  const loaded = await loadMatch(body.matchId);
-  if (!loaded.ok) {
-    return fail(c, loaded.error, loaded.status);
+  const parsedBody = await readJsonValidated(c, parseAttackBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
 
-  const wasFinished = loaded.match.status === "finished";
-  const side = sideForUser(loaded.match, actor.userId);
-  if (!side) {
-    return fail(c, "You are not a player in this match.", 403);
-  }
-  if (side !== body.action.side) {
-    return fail(c, "Action side mismatch.", 403);
-  }
+  try {
+    return await withMatchLock(body.matchId, async () => {
+      const loaded = await loadMatch(body.matchId);
+      if (!loaded.ok) {
+        return fail(c, loaded.error, loaded.status);
+      }
 
-  let next = tickTimeouts(loaded.match);
-  const tutorialValidation = validateTutorialAction(next, side, "attack", body.action);
-  if (!tutorialValidation.ok) {
-    return ok(c, {
-      result: {
-        ok: false,
-        error: tutorialValidation.error,
-        match: next,
-      } satisfies MatchActionResult,
+      const archivedError = await ensureMatchWeekWritable(storageRedis, loaded.match);
+      if (archivedError) {
+        return fail(c, archivedError, 409);
+      }
+
+      const wasFinished = loaded.match.status === "finished";
+      const side = sideForUser(loaded.match, actor.userId);
+      if (!side) {
+        return fail(c, "You are not a player in this match.", 403);
+      }
+      if (side !== body.action.side) {
+        return fail(c, "Action side mismatch.", 403);
+      }
+
+      const loadedUpdatedAt = loaded.match.updatedAt;
+      const ticked = tickTimeoutsWithMeta(loaded.match);
+      let next = ticked.match;
+      const tutorialValidation = validateTutorialAction(next, side, "attack", body.action);
+      if (!tutorialValidation.ok) {
+        return ok(c, {
+          result: {
+            ok: false,
+            error: tutorialValidation.error,
+            match: next,
+          } satisfies MatchActionResult,
+        });
+      }
+      const result = attack(next, body.action);
+      if (result.ok) {
+        advanceTutorialAfterAction(result.match, "attack");
+      }
+      next = runAiUntilHumanTurn(result.match);
+
+      await finalizeIfFinished(storageRedis, wasFinished, next);
+      await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
+
+      return ok(c, {
+        result: {
+          ok: result.ok,
+          error: result.error,
+          match: next,
+        } satisfies MatchActionResult,
+      });
     });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to resolve attack.", 500);
   }
-  const result = attack(next, body.action);
-  if (result.ok) {
-    advanceTutorialAfterAction(result.match, "attack");
-  }
-  next = runAiUntilHumanTurn(result.match);
-
-  await finalizeIfFinished(storageRedis, wasFinished, next);
-  await saveMatch(storageRedis, next);
-
-  return ok(c, {
-    result: {
-      ok: result.ok,
-      error: result.error,
-      match: next,
-    } satisfies MatchActionResult,
-  });
 });
 
 api.post("/match/reposition-judge", async (c) => {
@@ -1142,51 +1398,62 @@ api.post("/match/reposition-judge", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as {
-    matchId: string;
-    action: {
-      side: PlayerSide;
-      unitId: string;
-    };
-  };
-
-  const loaded = await loadMatch(body.matchId);
-  if (!loaded.ok) {
-    return fail(c, loaded.error, loaded.status);
+  const parsedBody = await readJsonValidated(c, parseRepositionJudgeBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
 
-  const wasFinished = loaded.match.status === "finished";
-  const side = sideForUser(loaded.match, actor.userId);
-  if (!side) {
-    return fail(c, "You are not a player in this match.", 403);
-  }
-  if (side !== body.action.side) {
-    return fail(c, "Action side mismatch.", 403);
-  }
+  try {
+    return await withMatchLock(body.matchId, async () => {
+      const loaded = await loadMatch(body.matchId);
+      if (!loaded.ok) {
+        return fail(c, loaded.error, loaded.status);
+      }
 
-  let next = tickTimeouts(loaded.match);
-  if (next.mode === "tutorial") {
-    return ok(c, {
-      result: {
-        ok: false,
-        error: "Tutorial step does not use Judge reposition action.",
-        match: next,
-      } satisfies MatchActionResult,
+      const archivedError = await ensureMatchWeekWritable(storageRedis, loaded.match);
+      if (archivedError) {
+        return fail(c, archivedError, 409);
+      }
+
+      const wasFinished = loaded.match.status === "finished";
+      const side = sideForUser(loaded.match, actor.userId);
+      if (!side) {
+        return fail(c, "You are not a player in this match.", 403);
+      }
+      if (side !== body.action.side) {
+        return fail(c, "Action side mismatch.", 403);
+      }
+
+      const loadedUpdatedAt = loaded.match.updatedAt;
+      const ticked = tickTimeoutsWithMeta(loaded.match);
+      let next = ticked.match;
+      if (next.mode === "tutorial") {
+        return ok(c, {
+          result: {
+            ok: false,
+            error: "Tutorial step does not use Judge reposition action.",
+            match: next,
+          } satisfies MatchActionResult,
+        });
+      }
+      const result = repositionJudgeSpecialist(next, body.action);
+      next = runAiUntilHumanTurn(result.match);
+
+      await finalizeIfFinished(storageRedis, wasFinished, next);
+      await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
+
+      return ok(c, {
+        result: {
+          ok: result.ok,
+          error: result.error,
+          match: next,
+        } satisfies MatchActionResult,
+      });
     });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to reposition Judge specialist.", 500);
   }
-  const result = repositionJudgeSpecialist(next, body.action);
-  next = runAiUntilHumanTurn(result.match);
-
-  await finalizeIfFinished(storageRedis, wasFinished, next);
-  await saveMatch(storageRedis, next);
-
-  return ok(c, {
-    result: {
-      ok: result.ok,
-      error: result.error,
-      match: next,
-    } satisfies MatchActionResult,
-  });
 });
 
 api.post("/match/end-turn", async (c) => {
@@ -1195,60 +1462,74 @@ api.post("/match/end-turn", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as {
-    matchId: string;
-    action: { side: PlayerSide };
-  };
+  const parsedBody = await readJsonValidated(c, parseEndTurnBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
+  }
+  const body = parsedBody.value;
 
-  const loaded = await loadMatch(body.matchId);
-  if (!loaded.ok) {
-    return fail(c, loaded.error, loaded.status);
-  }
-
-  const wasFinished = loaded.match.status === "finished";
-  const side = sideForUser(loaded.match, actor.userId);
-  if (!side) {
-    return fail(c, "You are not a player in this match.", 403);
-  }
-  if (side !== body.action.side) {
-    return fail(c, "Action side mismatch.", 403);
-  }
-
-  let next = tickTimeouts(loaded.match);
-  const tutorialValidation = validateTutorialAction(next, side, "end-turn", body.action);
-  if (!tutorialValidation.ok) {
-    return ok(c, {
-      result: {
-        ok: false,
-        error: tutorialValidation.error,
-        match: next,
-      } satisfies MatchActionResult,
-    });
-  }
-  const result = endTurn(next, body.action.side);
-  if (result.ok) {
-    let progressed = result.match;
-    if (progressed.mode === "tutorial" && progressed.status === "active" && progressed.activeSide === "B") {
-      const autoPass = endTurn(progressed, "B");
-      if (autoPass.ok) {
-        progressed = autoPass.match;
+  try {
+    return await withMatchLock(body.matchId, async () => {
+      const loaded = await loadMatch(body.matchId);
+      if (!loaded.ok) {
+        return fail(c, loaded.error, loaded.status);
       }
-    }
-    advanceTutorialAfterAction(progressed, "end-turn");
-    next = progressed;
+
+      const archivedError = await ensureMatchWeekWritable(storageRedis, loaded.match);
+      if (archivedError) {
+        return fail(c, archivedError, 409);
+      }
+
+      const wasFinished = loaded.match.status === "finished";
+      const side = sideForUser(loaded.match, actor.userId);
+      if (!side) {
+        return fail(c, "You are not a player in this match.", 403);
+      }
+      if (side !== body.action.side) {
+        return fail(c, "Action side mismatch.", 403);
+      }
+
+      const loadedUpdatedAt = loaded.match.updatedAt;
+      const ticked = tickTimeoutsWithMeta(loaded.match);
+      let next = ticked.match;
+      const tutorialValidation = validateTutorialAction(next, side, "end-turn", body.action);
+      if (!tutorialValidation.ok) {
+        return ok(c, {
+          result: {
+            ok: false,
+            error: tutorialValidation.error,
+            match: next,
+          } satisfies MatchActionResult,
+        });
+      }
+      const result = endTurn(next, body.action.side);
+      if (result.ok) {
+        let progressed = result.match;
+        if (progressed.mode === "tutorial" && progressed.status === "active" && progressed.activeSide === "B") {
+          const autoPass = endTurn(progressed, "B");
+          if (autoPass.ok) {
+            progressed = autoPass.match;
+          }
+        }
+        advanceTutorialAfterAction(progressed, "end-turn");
+        next = progressed;
+      }
+      next = runAiUntilHumanTurn(next);
+
+      await finalizeIfFinished(storageRedis, wasFinished, next);
+      await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
+
+      return ok(c, {
+        result: {
+          ok: result.ok,
+          error: result.error,
+          match: next,
+        } satisfies MatchActionResult,
+      });
+    });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to end turn.", 500);
   }
-  next = runAiUntilHumanTurn(next);
-
-  await finalizeIfFinished(storageRedis, wasFinished, next);
-  await saveMatch(storageRedis, next);
-
-  return ok(c, {
-    result: {
-      ok: result.ok,
-      error: result.error,
-      match: next,
-    } satisfies MatchActionResult,
-  });
 });
 
 api.post("/match/repay-naked-short", async (c) => {
@@ -1257,48 +1538,62 @@ api.post("/match/repay-naked-short", async (c) => {
     return fail(c, actor.error, actor.status);
   }
 
-  const body = (await c.req.json()) as {
-    matchId: string;
-    action: { side: PlayerSide };
-  };
-
-  const loaded = await loadMatch(body.matchId);
-  if (!loaded.ok) {
-    return fail(c, loaded.error, loaded.status);
+  const parsedBody = await readJsonValidated(c, parseRepayNakedShortBody);
+  if (!parsedBody.ok) {
+    return parsedBody.response;
   }
+  const body = parsedBody.value;
 
-  const wasFinished = loaded.match.status === "finished";
-  const side = sideForUser(loaded.match, actor.userId);
-  if (!side) {
-    return fail(c, "You are not a player in this match.", 403);
-  }
-  if (side !== body.action.side) {
-    return fail(c, "Action side mismatch.", 403);
-  }
+  try {
+    return await withMatchLock(body.matchId, async () => {
+      const loaded = await loadMatch(body.matchId);
+      if (!loaded.ok) {
+        return fail(c, loaded.error, loaded.status);
+      }
 
-  let next = tickTimeouts(loaded.match);
-  if (next.mode === "tutorial") {
-    return ok(c, {
-      result: {
-        ok: false,
-        error: "Tutorial step does not use Naked Short repayment.",
-        match: next,
-      } satisfies MatchActionResult,
+      const archivedError = await ensureMatchWeekWritable(storageRedis, loaded.match);
+      if (archivedError) {
+        return fail(c, archivedError, 409);
+      }
+
+      const wasFinished = loaded.match.status === "finished";
+      const side = sideForUser(loaded.match, actor.userId);
+      if (!side) {
+        return fail(c, "You are not a player in this match.", 403);
+      }
+      if (side !== body.action.side) {
+        return fail(c, "Action side mismatch.", 403);
+      }
+
+      const loadedUpdatedAt = loaded.match.updatedAt;
+      const ticked = tickTimeoutsWithMeta(loaded.match);
+      let next = ticked.match;
+      if (next.mode === "tutorial") {
+        return ok(c, {
+          result: {
+            ok: false,
+            error: "Tutorial step does not use Naked Short repayment.",
+            match: next,
+          } satisfies MatchActionResult,
+        });
+      }
+      const result = repayNakedShort(next, body.action.side);
+      next = runAiUntilHumanTurn(result.match);
+
+      await finalizeIfFinished(storageRedis, wasFinished, next);
+      await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
+
+      return ok(c, {
+        result: {
+          ok: result.ok,
+          error: result.error,
+          match: next,
+        } satisfies MatchActionResult,
+      });
     });
+  } catch (error) {
+    return failLockBusy(c, error) ?? fail(c, "Failed to repay Naked Short debt.", 500);
   }
-  const result = repayNakedShort(next, body.action.side);
-  next = runAiUntilHumanTurn(result.match);
-
-  await finalizeIfFinished(storageRedis, wasFinished, next);
-  await saveMatch(storageRedis, next);
-
-  return ok(c, {
-    result: {
-      ok: result.ok,
-      error: result.error,
-      match: next,
-    } satisfies MatchActionResult,
-  });
 });
 
 api.get("/health", async (c) => {

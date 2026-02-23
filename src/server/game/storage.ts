@@ -6,19 +6,32 @@ export type LeaderboardBucket = "all" | "pvp" | "pve_l1" | "pve_l2" | "pve_l3";
 
 type RuntimeRedis = Pick<
   RedisClient,
-  "get" | "set" | "del" | "incrBy" | "hSet" | "hKeys" | "hDel" | "zAdd" | "zRange"
+  "get" | "set" | "del" | "expire" | "incrBy" | "hSet" | "hSetNX" | "hKeys" | "hDel" | "zAdd" | "zRange"
 >;
 
-export interface RedisLike {
+export type RedisLike = {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
   del(key: string): Promise<void>;
+  expire(key: string, seconds: number): Promise<void>;
   incrBy(key: string, amount: number): Promise<number>;
+  hSetNX(key: string, field: string, value: string): Promise<number>;
   sAdd(key: string, member: string): Promise<void>;
   sMembers(key: string): Promise<string[]>;
   sRem(key: string, member: string): Promise<void>;
   zAdd(key: string, score: number, member: string): Promise<void>;
   zRange(key: string, start: number, stop: number, options?: { rev?: boolean }): Promise<string[]>;
+};
+
+export class LockBusyError extends Error {
+  constructor(lockName: string) {
+    super(`Lock busy: ${lockName}`);
+    this.name = "LockBusyError";
+  }
+}
+
+export function isLockBusyError(error: unknown): error is LockBusyError {
+  return error instanceof LockBusyError;
 }
 
 export function createRedisLike(runtimeRedis: RuntimeRedis): RedisLike {
@@ -30,7 +43,11 @@ export function createRedisLike(runtimeRedis: RuntimeRedis): RedisLike {
     del: async (key) => {
       await runtimeRedis.del(key);
     },
+    expire: async (key, seconds) => {
+      await runtimeRedis.expire(key, seconds);
+    },
     incrBy: async (key, amount) => runtimeRedis.incrBy(key, amount),
+    hSetNX: async (key, field, value) => runtimeRedis.hSetNX(key, field, value),
     sAdd: async (key, member) => {
       await runtimeRedis.hSet(key, { [member]: "1" });
     },
@@ -124,6 +141,80 @@ function keyUserPvpLobbies(userId: string): string {
   return `${PREFIX}:user:${userId}:pvp:lobbies`;
 }
 
+function keyInviteCreateCooldown(userId: string): string {
+  return `${PREFIX}:user:${userId}:invite:create:cooldown`;
+}
+
+function keyLock(lockName: string): string {
+  return `${PREFIX}:lock:${lockName}`;
+}
+
+function keyMatchResultCommit(matchId: string): string {
+  return `${PREFIX}:match:${matchId}:resultCommitted`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function safeParseJson<T>(raw: string, label: string): T | null {
+  try {
+    const parsed: T = JSON.parse(raw);
+    return parsed;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[storage] Failed to parse JSON for ${label}: ${message}`);
+    return null;
+  }
+}
+
+export type LockOptions = {
+  ttlSeconds?: number;
+  waitMs?: number;
+  retryMs?: number;
+};
+
+export async function withLock<T>(
+  redis: RedisLike,
+  lockName: string,
+  options: LockOptions,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const ttlSeconds = Math.max(1, Math.floor(options.ttlSeconds ?? 15));
+  const waitMs = Math.max(0, Math.floor(options.waitMs ?? 2_000));
+  const retryMs = Math.max(10, Math.floor(options.retryMs ?? 25));
+  const lockKey = keyLock(lockName);
+  const token = `${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+  const deadline = Date.now() + waitMs;
+  let acquired = false;
+
+  while (!acquired) {
+    const won = await redis.hSetNX(lockKey, "token", token);
+    if (won === 1) {
+      acquired = true;
+      await redis.expire(lockKey, ttlSeconds);
+      break;
+    }
+    if (Date.now() >= deadline) {
+      throw new LockBusyError(lockName);
+    }
+    await sleep(retryMs);
+  }
+
+  try {
+    return await fn();
+  } finally {
+    await redis.del(lockKey);
+  }
+}
+
+export async function markMatchResultCommitted(redis: RedisLike, matchId: string): Promise<boolean> {
+  const won = await redis.hSetNX(keyMatchResultCommit(matchId), "done", "1");
+  return won === 1;
+}
+
 export async function getCurrentWeekId(redis: RedisLike): Promise<string | null> {
   return redis.get(keyCurrentWeek());
 }
@@ -181,7 +272,7 @@ export async function getMatch(redis: RedisLike, matchId: string): Promise<Match
   if (!raw) {
     return null;
   }
-  return JSON.parse(raw) as MatchState;
+  return safeParseJson<MatchState>(raw, `match:${matchId}`);
 }
 
 export async function indexMatchForUser(redis: RedisLike, userId: string, matchId: string): Promise<void> {
@@ -221,7 +312,7 @@ export async function getInvite(redis: RedisLike, inviteId: string): Promise<Inv
   if (!raw) {
     return null;
   }
-  return JSON.parse(raw) as InviteState;
+  return safeParseJson<InviteState>(raw, `invite:${inviteId}`);
 }
 
 export async function updateInvite(redis: RedisLike, invite: InviteState): Promise<void> {
@@ -252,7 +343,7 @@ export async function getPvpLobby(redis: RedisLike, lobbyId: string): Promise<Pv
   if (!raw) {
     return null;
   }
-  return JSON.parse(raw) as PvpLobbyState;
+  return safeParseJson<PvpLobbyState>(raw, `pvpLobby:${lobbyId}`);
 }
 
 export async function indexPvpLobbyForUser(redis: RedisLike, userId: string, lobbyId: string): Promise<void> {
@@ -265,6 +356,23 @@ export async function unindexPvpLobbyForUser(redis: RedisLike, userId: string, l
 
 export async function listUserPvpLobbyIds(redis: RedisLike, userId: string): Promise<string[]> {
   return redis.sMembers(keyUserPvpLobbies(userId));
+}
+
+export async function getInviteCreateCooldownUntil(redis: RedisLike, userId: string): Promise<number | null> {
+  const raw = await redis.get(keyInviteCreateCooldown(userId));
+  if (!raw) {
+    return null;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.floor(parsed);
+}
+
+export async function setInviteCreateCooldown(redis: RedisLike, userId: string, untilTs: number, ttlSeconds: number): Promise<void> {
+  await redis.set(keyInviteCreateCooldown(userId), String(Math.max(0, Math.floor(untilTs))));
+  await redis.expire(keyInviteCreateCooldown(userId), Math.max(1, Math.floor(ttlSeconds)));
 }
 
 export async function deletePvpLobby(redis: RedisLike, lobby: PvpLobbyState): Promise<void> {
@@ -302,7 +410,16 @@ async function readUserStats(
     };
   }
 
-  const parsed = JSON.parse(statsRaw) as WeeklyUserStats;
+  const parsed = safeParseJson<WeeklyUserStats>(statsRaw, `weekUserStats:${weekId}:${userId}:${bucket}`);
+  if (!parsed) {
+    return {
+      userId,
+      username,
+      wins: 0,
+      losses: 0,
+      matches: 0,
+    };
+  }
   return {
     ...parsed,
     username,
@@ -338,29 +455,36 @@ export async function recordUserOutcome(
   didWin: boolean,
   bucket: LeaderboardBucket = "all",
 ): Promise<void> {
-  const allStats = await readUserStats(redis, weekId, user.userId, "all");
-  allStats.username = user.username;
-  allStats.matches += 1;
-  if (didWin) {
-    allStats.wins += 1;
-  } else {
-    allStats.losses += 1;
-  }
-  await writeUserStats(redis, weekId, allStats, "all");
+  await withLock(
+    redis,
+    `stats:${weekId}:${user.userId}`,
+    { ttlSeconds: 15, waitMs: 2_000, retryMs: 25 },
+    async () => {
+      const allStats = await readUserStats(redis, weekId, user.userId, "all");
+      allStats.username = user.username;
+      allStats.matches += 1;
+      if (didWin) {
+        allStats.wins += 1;
+      } else {
+        allStats.losses += 1;
+      }
+      await writeUserStats(redis, weekId, allStats, "all");
 
-  if (bucket === "all") {
-    return;
-  }
+      if (bucket === "all") {
+        return;
+      }
 
-  const stats = await readUserStats(redis, weekId, user.userId, bucket);
-  stats.username = user.username;
-  stats.matches += 1;
-  if (didWin) {
-    stats.wins += 1;
-  } else {
-    stats.losses += 1;
-  }
-  await writeUserStats(redis, weekId, stats, bucket);
+      const stats = await readUserStats(redis, weekId, user.userId, bucket);
+      stats.username = user.username;
+      stats.matches += 1;
+      if (didWin) {
+        stats.wins += 1;
+      } else {
+        stats.losses += 1;
+      }
+      await writeUserStats(redis, weekId, stats, bucket);
+    },
+  );
 }
 
 export async function getLeaderboardTop(
@@ -402,15 +526,17 @@ export async function newWeekIdFromDate(now: Date): Promise<string> {
 
 export function weekSummaryLine(top3: WeeklyUserStats[], totalMatches: number): string {
   if (top3.length === 0) {
-    return `Weekly court summary: no completed matches yet. Total matches: ${totalMatches}.`;
+    return `Weekly Court Summary\n\nNo completed matches yet.\n\nTotal matches: ${totalMatches}.`;
   }
 
+  const medals = ["🥇", "🥈", "🥉"] as const;
   const podium = top3
     .map((row, i) => {
       const ratio = row.matches > 0 ? (row.wins / row.matches).toFixed(2) : "0.00";
-      return `${i + 1}. u/${row.username} (${row.wins}-${row.losses}, ratio ${ratio})`;
+      const medal = medals[i] ?? `${i + 1}.`;
+      return `${medal} u/${row.username} (${row.wins}-${row.losses}, ratio ${ratio})`;
     })
-    .join(" | ");
+    .join("\n");
 
-  return `Weekly court summary: ${podium}. Total matches: ${totalMatches}.`;
+  return `Weekly Court Summary\n\n${podium}\n\nTotal matches: ${totalMatches}.`;
 }

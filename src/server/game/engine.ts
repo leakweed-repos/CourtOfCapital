@@ -45,46 +45,19 @@ import {
   type JudgeSupportEffect,
 } from "../../shared/judge-specialists";
 import { getResistanceChance, type ResistanceKind } from "../../shared/resistance";
-import { getUnitSignatureProfile } from "../../shared/unit-signatures";
 import { isJudgeCorruptSpecialistCard, isJudgePositiveSpecialistCard, isJudgeSpecialistCard } from "../../shared/placement";
 import { tutorialTickPause } from "./tutorial";
 import { isSandboxCleanupCard } from "./sandbox";
+import { computeJudgeCatchChance } from "./judge-risk";
+import {
+  runV2UnitCombatTriggers,
+  runV2UnitOnSummonTriggers,
+  runV2UnitTurnStartTriggers,
+  type V2UnitRuntimeApi,
+} from "./card-runtime";
 
 const MAX_LOG = 60;
 const BOARD_LANES: Array<"front" | "back"> = ["front", "back"];
-const EXPLICIT_UNIT_SKILL_IDS = new Set<string>([
-  "guild_bailiff",
-  "market_arbiter",
-  "compliance_clerk",
-  "market_referee",
-  "clearing_router",
-  "public_defender",
-  "investor_relations_chief",
-  "clearing_knight",
-  "diamond_hand_captain",
-  "meme_berserker",
-  "meme_editor",
-  "roadshow_blade",
-  "yolo_striker",
-  "panic_seller_agent",
-  "rehypothecator",
-  "bribe_courier",
-  "civic_auditor",
-  "settlement_liaison",
-  "syndicate_baron",
-  "floor_mediator",
-  "retail_rebel",
-  "discord_moderator",
-  "fud_negotiator",
-  "doom_researcher",
-  "borrow_rate_whisperer",
-  "halt_marshall",
-  "spread_sniper",
-  "whisper_lobbyist",
-  "ftd_collector",
-  "narrative_assassin",
-]);
-
 function pushLog(match: MatchState, text: string): void {
   match.log.push({ at: nowTs(), turn: match.turn, text });
   if (match.log.length > MAX_LOG) {
@@ -374,6 +347,39 @@ function clearNegativeEffects(unit: UnitState, turn: number): number {
   return removed;
 }
 
+function clearNegativeEffectsByStatus(
+  unit: UnitState,
+  turn: number,
+  statuses?: Parameters<V2UnitRuntimeApi["cleanseUnit"]>[1],
+): number {
+  if (!statuses || statuses.length === 0) {
+    return clearNegativeEffects(unit, turn);
+  }
+
+  let removed = 0;
+  if (statuses.includes("stun") && (unit.stunnedUntilTurn ?? 0) > turn) {
+    unit.stunnedUntilTurn = turn;
+    unit.cannotAttackUntilTurn = Math.min(unit.cannotAttackUntilTurn, turn);
+    removed += 1;
+  }
+  if (statuses.includes("exposed") && (unit.exposedUntilTurn ?? -1) >= turn) {
+    unit.exposedUntilTurn = undefined;
+    removed += 1;
+  }
+  if (
+    statuses.includes("atk_down") &&
+    (unit.tempAttackPenalty ?? 0) > 0 &&
+    (unit.tempAttackPenaltyUntilTurn ?? Number.NEGATIVE_INFINITY) >= turn
+  ) {
+    const penalty = unit.tempAttackPenalty ?? 0;
+    unit.attack += penalty;
+    unit.tempAttackPenalty = undefined;
+    unit.tempAttackPenaltyUntilTurn = undefined;
+    removed += 1;
+  }
+  return removed;
+}
+
 function isUnitExposed(match: MatchState, unit: UnitState): boolean {
   return typeof unit.exposedUntilTurn === "number" && unit.exposedUntilTurn >= match.turn;
 }
@@ -471,77 +477,40 @@ function randomUnitId(match: MatchState, ids: string[], label: string): string |
   if (ids.length === 0) return undefined;
   return ids[Math.floor(nextRoll(match, label) * ids.length)] as string;
 }
-function hasExplicitUnitSkill(cardId: string): boolean {
-  return EXPLICIT_UNIT_SKILL_IDS.has(cardId);
-}
 
-function applyFallbackUnitOnSummonSkill(match: MatchState, side: PlayerSide, unit: UnitState): void {
-  const signature = getUnitSignatureProfile(unit.cardId);
-  if (signature.kind === "entry-shield") {
-    addUnitShield(unit, signature.valueA);
-    pushLog(match, `${unit.name} signature: entered with ${signature.valueA} shield.`);
-    return;
-  }
-
-  if (signature.kind === "entry-heal") {
-    const allyId = pickLowestHealthUnitId(match, listSideUnitIds(match, side));
-    if (!allyId) {
-      return;
-    }
-    const ally = match.units[allyId];
-    if (!ally) {
-      return;
-    }
-    const healed = healUnit(ally, signature.valueA);
-    if (healed > 0) {
-      pushLog(match, `${unit.name} signature: healed ${ally.name} for ${healed}.`);
-    }
-  }
-}
-
-function applyFallbackUnitTurnStartSkill(match: MatchState, side: PlayerSide, unit: UnitState): void {
-  const signature = getUnitSignatureProfile(unit.cardId);
-  if (signature.kind === "turn-income") {
-    match.players[side].shares += signature.valueA;
-    pushLog(match, `${unit.name} signature: +${signature.valueA} shares.`);
-    return;
-  }
-
-  if (signature.kind === "turn-cleanse") {
-    const cleaned = clearNegativeEffects(unit, match.turn);
-    const healed = healUnit(unit, signature.valueA);
-    if (cleaned > 0 || healed > 0) {
-      pushLog(match, `${unit.name} signature: cleanse ${cleaned}, heal ${healed}.`);
-    }
-  }
-}
-
-function applyFallbackUnitCombatSkill(
-  match: MatchState,
-  side: PlayerSide,
-  attacker: UnitState,
-  target: UnitState,
-  targetDied: boolean,
-  attackerDied: boolean,
-): void {
-  const signature = getUnitSignatureProfile(attacker.cardId);
-
-  if (signature.kind === "combat-expose" && !targetDied) {
-    exposeUnitUntil(target, match.turn + signature.valueA, match, `${attacker.name} signature expose`);
-    pushLog(match, `${attacker.name} signature: exposed ${target.name}.`);
-    return;
-  }
-
-  if (signature.kind === "combat-fee" && !attackerDied) {
-    match.players[side].shares += signature.valueA;
-    pushLog(match, `${attacker.name} signature: +${signature.valueA} shares on contact.`);
-    return;
-  }
-
-  if (signature.kind === "combat-snowball" && !attackerDied) {
-    attacker.attack += signature.valueA;
-    pushLog(match, `${attacker.name} signature: +${signature.valueA} attack after combat.`);
-  }
+function createV2UnitRuntimeApi(match: MatchState): V2UnitRuntimeApi {
+  return {
+    listSideUnitIds: (side, lane) => listSideUnitIds(match, side, lane),
+    getUnit: (unitId) => match.units[unitId],
+    randomUnitId: (unitIds, label) => randomUnitId(match, unitIds, label),
+    pickLowestHealthUnitId: (unitIds) => pickLowestHealthUnitId(match, unitIds),
+    healUnit,
+    addUnitShield,
+    cleanseUnit: (unit, statuses) => clearNegativeEffectsByStatus(unit, match.turn, statuses),
+    exposeUnitUntil: (unit, untilTurn, sourceLabel) => exposeUnitUntil(unit, untilTurn, match, sourceLabel),
+    stunUnitUntil: (unit, untilTurn, sourceLabel) => stunUnitUntil(unit, untilTurn, match, sourceLabel),
+    applyTemporaryAttackPenalty: (unit, amount, untilTurn, sourceLabel) =>
+      applyTemporaryAttackPenalty(match, unit, amount, untilTurn, sourceLabel),
+    modifyAttack: (unit, amount) => {
+      const before = unit.attack;
+      unit.attack = Math.max(1, unit.attack + amount);
+      return unit.attack - before;
+    },
+    gainShares: (side, amount) => {
+      match.players[side].shares += amount;
+    },
+    healLeader: (side, amount) => {
+      if (amount <= 0) {
+        return 0;
+      }
+      const leader = match.players[side].leader;
+      const before = leader.hp;
+      leader.hp = Math.min(leader.maxHp, leader.hp + amount);
+      return leader.hp - before;
+    },
+    drawOne: (side) => drawOne(match, side),
+    pushLog: (text) => pushLog(match, text),
+  };
 }
 
 function applyRetailBacklash(match: MatchState, deadSide: PlayerSide, enemySide: PlayerSide): void {
@@ -577,6 +546,17 @@ function applyUnitOnSummonSkill(match: MatchState, side: PlayerSide, unit: UnitS
 
   if (!hasActiveJudgeSkillContext(unit)) {
     pushLog(match, `${unit.name} is outside its Judge slot and acts as a stat-only unit.`);
+    return;
+  }
+
+  if (
+    runV2UnitOnSummonTriggers({
+      side,
+      unit,
+      turn: match.turn,
+      api: createV2UnitRuntimeApi(match),
+    })
+  ) {
     return;
   }
 
@@ -802,9 +782,6 @@ function applyUnitOnSummonSkill(match: MatchState, side: PlayerSide, unit: UnitS
     return;
   }
 
-  if (!hasExplicitUnitSkill(unit.cardId)) {
-    applyFallbackUnitOnSummonSkill(match, side, unit);
-  }
 }
 
 function applyFactionOnSummon(match: MatchState, side: PlayerSide, unit: UnitState): void {
@@ -891,6 +868,7 @@ function applyUnitTurnStartSkills(match: MatchState, side: PlayerSide): void {
   const enemyPlayer = match.players[enemy];
   const ownUnits = listSideUnitIds(match, side);
   const enemyUnits = listSideUnitIds(match, enemy);
+  const v2RuntimeApi = createV2UnitRuntimeApi(match);
 
   let civicAuditorProcs = 0;
   for (const id of ownUnits) {
@@ -898,6 +876,17 @@ function applyUnitTurnStartSkills(match: MatchState, side: PlayerSide): void {
     if (!unit) continue;
 
     if (!hasActiveJudgeSkillContext(unit)) {
+      continue;
+    }
+
+    if (
+      runV2UnitTurnStartTriggers({
+        side,
+        unit,
+        turn: match.turn,
+        api: v2RuntimeApi,
+      })
+    ) {
       continue;
     }
 
@@ -1067,9 +1056,6 @@ function applyUnitTurnStartSkills(match: MatchState, side: PlayerSide): void {
       continue;
     }
 
-    if (!hasExplicitUnitSkill(unit.cardId)) {
-      applyFallbackUnitTurnStartSkill(match, side, unit);
-    }
   }
 }
 
@@ -1225,6 +1211,21 @@ function applyFactionCombatHooks(
     applyRetailBacklash(match, side, enemy);
   }
 
+  if (
+    activeJudgeSkillContext &&
+    runV2UnitCombatTriggers({
+      side,
+      unit: attacker,
+      turn: match.turn,
+      api: createV2UnitRuntimeApi(match),
+      target,
+      targetDied,
+      attackerDied,
+    })
+  ) {
+    return;
+  }
+
   if (activeJudgeSkillContext && attacker.cardId === "halt_marshall" && !targetDied) {
     stunUnitUntil(target, match.turn + 2, match, "Halt Marshall hit");
     pushLog(match, `Halt Marshall locked ${target.name}: stunned.`);
@@ -1267,9 +1268,6 @@ function applyFactionCombatHooks(
     return;
   }
 
-  if (activeJudgeSkillContext && !hasExplicitUnitSkill(attacker.cardId)) {
-    applyFallbackUnitCombatSkill(match, side, attacker, target, targetDied, attackerDied);
-  }
 }
 
 type LeaderFrontShield = {
@@ -1768,10 +1766,12 @@ function dealDamageToLeader(match: MatchState, side: PlayerSide, damage: number)
 
 function judgeCatchChance(match: MatchState, side: PlayerSide, dirtyPower: number): number {
   const p = match.players[side];
-  const base = 0.08 + dirtyPower * 0.09;
-  const probation = p.probation * 0.07;
-  const mood = clamp(match.judgeMood, -5, 5) * 0.02;
-  return clamp(base + probation + mood, 0.05, 0.95);
+  return computeJudgeCatchChance({
+    dirtyPower,
+    probation: p.probation,
+    judgeMood: match.judgeMood,
+    judgeHostility: p.judgeHostility,
+  });
 }
 
 function applyJudgePenalty(
@@ -2600,8 +2600,16 @@ function startActiveFromMulligan(match: MatchState): void {
 }
 
 export function tickTimeouts(match: MatchState, now = nowTs()): MatchState {
+  return tickTimeoutsWithMeta(match, now).match;
+}
+
+export function tickTimeoutsWithMeta(match: MatchState, now = nowTs()): { match: MatchState; changed: boolean } {
+  let changed = false;
   if (match.mode === "tutorial" && match.tutorial?.paused) {
-    return tutorialTickPause(match, now);
+    const prevUpdatedAt = match.updatedAt;
+    tutorialTickPause(match, now);
+    match.updatedAt = prevUpdatedAt;
+    return { match, changed: false };
   }
 
   if (match.status === "mulligan" && now >= match.mulliganDeadlineAt) {
@@ -2613,15 +2621,19 @@ export function tickTimeouts(match: MatchState, now = nowTs()): MatchState {
       }
     }
     startActiveFromMulligan(match);
+    changed = true;
   }
 
   if (match.status === "active" && now >= match.turnDeadlineAt) {
     pushLog(match, `Turn timeout for ${match.activeSide}. Auto-pass.`);
     endTurnInternal(match);
+    changed = true;
   }
 
-  match.updatedAt = now;
-  return match;
+  if (changed) {
+    match.updatedAt = now;
+  }
+  return { match, changed };
 }
 
 export function applyMulligan(match: MatchState, input: MulliganInput): MatchActionResult {
