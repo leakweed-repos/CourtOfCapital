@@ -14,6 +14,7 @@ import {
 } from "../../shared/game";
 import type {
   AttackInput,
+  BotPlannedAction,
   FactionId,
   MatchActionResult,
   MatchState,
@@ -3241,6 +3242,10 @@ type BotCardTimingEval = {
   scoreDelta: number;
 };
 
+export type BotActionRecorder = {
+  record(action: BotPlannedAction): void;
+};
+
 function botEvaluateUnitOnSummonTiming(match: MatchState, side: PlayerSide, cardId: string): BotCardTimingEval {
   const v2 = getCardV2ById(cardId);
   if (!v2 || v2.kind !== "unit") {
@@ -3518,7 +3523,7 @@ function botCardPlayPriorityScore(match: MatchState, side: PlayerSide, cardId: s
   return score;
 }
 
-function botTryPlayOneCard(match: MatchState, side: PlayerSide, preferredCol: number): boolean {
+function botTryPlayOneCard(match: MatchState, side: PlayerSide, preferredCol: number, recorder?: BotActionRecorder): boolean {
   if (match.status !== "active" || match.activeSide !== side) {
     return false;
   }
@@ -3557,6 +3562,13 @@ function botTryPlayOneCard(match: MatchState, side: PlayerSide, preferredCol: nu
         target: targetPlan.target,
       });
       if (played.ok) {
+        recorder?.record({
+          kind: "play_non_unit",
+          cardId: card.id,
+          cardName: card.name,
+          target: targetPlan.target,
+          leverage: card.id === "naked_shorting" ? 3 : undefined,
+        });
         return true;
       }
       continue;
@@ -3600,15 +3612,23 @@ function botTryPlayOneCard(match: MatchState, side: PlayerSide, preferredCol: nu
       if (player.board[slot.lane][slot.col] !== null) {
         continue;
       }
-      const played = playCard(match, {
-        side,
-        handIndex: pick.idx,
-        lane: slot.lane,
-        col: slot.col,
-      });
-      if (played.ok) {
-        return true;
-      }
+        const played = playCard(match, {
+          side,
+          handIndex: pick.idx,
+          lane: slot.lane,
+          col: slot.col,
+        });
+        if (played.ok) {
+          recorder?.record({
+            kind: "play_unit",
+            cardId: card.id,
+            cardName: card.name,
+            lane: slot.lane,
+            col: slot.col,
+            unitId: match.players[side].board[slot.lane][slot.col] ?? undefined,
+          });
+          return true;
+        }
     }
 
     for (const lane of targetLaneOrder) {
@@ -3636,6 +3656,14 @@ function botTryPlayOneCard(match: MatchState, side: PlayerSide, preferredCol: nu
         });
 
         if (played.ok) {
+          recorder?.record({
+            kind: "play_unit",
+            cardId: card.id,
+            cardName: card.name,
+            lane,
+            col,
+            unitId: match.players[side].board[lane][col] ?? undefined,
+          });
           return true;
         }
       }
@@ -3748,7 +3776,7 @@ function botShouldSkipAttack(match: MatchState, attacker: UnitState, target: Att
   return (fragileBackliner || supportRole) && lowValueDefender;
 }
 
-export function maybeRunBot(match: MatchState): MatchState {
+export function maybeRunBot(match: MatchState, recorder?: BotActionRecorder): MatchState {
   if (match.status !== "active") {
     return match;
   }
@@ -3793,7 +3821,7 @@ export function maybeRunBot(match: MatchState): MatchState {
   let botPlays = 0;
   while (botPlays < botPlayCap && match.status === "active" && match.activeSide === side) {
     const preferredCol = simpleAiPreferredCol(match.seed ^ 0x3377 ^ (botPlays + 1) * 131, match.turn + botPlays);
-    const played = botTryPlayOneCard(match, side, preferredCol);
+    const played = botTryPlayOneCard(match, side, preferredCol, recorder);
     if (!played) {
       break;
     }
@@ -3818,6 +3846,12 @@ export function maybeRunBot(match: MatchState): MatchState {
         target: { kind: "judge" },
       });
       if (judgeAction.ok) {
+        recorder?.record({
+          kind: "judge_action",
+          attackerName: attacker.name,
+          attackerUnitId: attacker.id,
+          judgeSlot: isGreenJudgeUnit(attacker) ? "green" : "blue",
+        });
         if ((match.status as string) === "finished") {
           break;
         }
@@ -3827,11 +3861,19 @@ export function maybeRunBot(match: MatchState): MatchState {
 
     const target = botPickAttackTarget(match, side, attacker);
     if (target && !botShouldSkipAttack(match, attacker, target)) {
-      attack(match, {
+      const attackResult = attack(match, {
         side,
         attackerUnitId,
         target,
       });
+      if (attackResult.ok) {
+        recorder?.record({
+          kind: "attack",
+          attackerName: attacker.name,
+          attackerUnitId: attacker.id,
+          target,
+        });
+      }
     }
 
     if ((match.status as string) === "finished") {
@@ -3841,6 +3883,7 @@ export function maybeRunBot(match: MatchState): MatchState {
 
   if (match.status === "active" && match.activeSide === side) {
     endTurn(match, side);
+    recorder?.record({ kind: "end_turn" });
   }
 
   return match;

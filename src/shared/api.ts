@@ -3,6 +3,7 @@ import type {
   InviteState,
   LobbySnapshot,
   MatchActionResult,
+  BotTurnPlanPublic,
   MatchState,
   MulliganInput,
   PlayCardInput,
@@ -132,10 +133,12 @@ export interface PvpLobbyStartResponse {
 
 export interface MatchResponse {
   result: MatchActionResult;
+  botPlan?: BotTurnPlanPublic;
 }
 
 export interface MatchDataResponse {
   match: MatchState;
+  botPlan?: BotTurnPlanPublic;
 }
 
 export const API_ROUTES = {

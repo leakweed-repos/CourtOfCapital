@@ -333,6 +333,50 @@ export interface RepositionJudgeInput {
   unitId: string;
 }
 
+export type BotPlannedAction =
+  | {
+      kind: "play_unit";
+      cardId: string;
+      cardName: string;
+      lane: Lane;
+      col: number;
+      unitId?: string;
+    }
+  | {
+      kind: "play_non_unit";
+      cardId: string;
+      cardName: string;
+      target?: PlayCardTarget;
+      leverage?: 2 | 3 | 4 | 5;
+    }
+  | {
+      kind: "attack";
+      attackerName: string;
+      attackerUnitId?: string;
+      target: AttackInput["target"];
+    }
+  | {
+      kind: "judge_action";
+      attackerName: string;
+      attackerUnitId?: string;
+      judgeSlot: "green" | "blue";
+    }
+  | {
+      kind: "end_turn";
+    };
+
+export type BotTurnPlanPublic = {
+  id: string;
+  matchId: string;
+  side: PlayerSide;
+  turn: number;
+  botLevel: 1 | 2 | 3;
+  createdAt: number;
+  readyAt: number;
+  actions: BotPlannedAction[];
+  timelineMs: number[];
+};
+
 export function opponentOf(side: PlayerSide): PlayerSide {
   return side === "A" ? "B" : "A";
 }

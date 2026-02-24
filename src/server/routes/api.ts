@@ -13,13 +13,14 @@ import {
   uniqueId,
   type InviteState,
   type MatchActionResult,
+  type BotTurnPlanPublic,
   type MatchState,
   type FactionId,
   type StartMatchInput,
 } from "../../shared/game";
 import { DEFAULT_FACTION } from "../game/models";
 import { createInitialMatch, endTurn, playCard, applyMulligan, attack, repositionJudgeSpecialist, repayNakedShort, sideForUser, tickTimeoutsWithMeta } from "../game/engine";
-import { runAiUntilHumanTurnWithStartDelay } from "../game/ai";
+import { orchestrateBotTurn } from "../game/bot-plan";
 import {
   acknowledgeTutorialStep,
   advanceTutorialAfterAction,
@@ -261,6 +262,10 @@ async function saveMatchIfChanged(
     await saveMatch(redisLike, match);
   }
   return changed;
+}
+
+async function advanceBotTurnOrExposePlan(match: MatchState): Promise<{ match: MatchState; botPlan?: BotTurnPlanPublic }> {
+  return orchestrateBotTurn(storageRedis, match);
 }
 
 async function loadMatch(matchId: string): Promise<{ ok: true; match: MatchState } | { ok: false; status: number; error: string }> {
@@ -1103,11 +1108,12 @@ api.post("/match/get", async (c) => {
         next = repaired.match;
       }
       // Polling route should stay responsive and avoid long lock holds; paced AI is used on action routes.
-      next = runAiUntilHumanTurnWithStartDelay(next);
+      const botAdvance = await advanceBotTurnOrExposePlan(next);
+      next = botAdvance.match;
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt, { force: repaired.repaired });
 
-      return ok(c, { match: next });
+      return ok(c, { match: next, botPlan: botAdvance.botPlan });
     });
   } catch (error) {
     return failLockBusy(c, error) ?? fail(c, "Failed to load match state.", 500);
@@ -1249,7 +1255,8 @@ api.post("/match/mulligan", async (c) => {
         });
       }
       const result = applyMulligan(next, body.action);
-      next = runAiUntilHumanTurnWithStartDelay(result.match);
+      const botAdvance = await advanceBotTurnOrExposePlan(result.match);
+      next = botAdvance.match;
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1260,6 +1267,7 @@ api.post("/match/mulligan", async (c) => {
           error: result.error,
           match: next,
         } satisfies MatchActionResult,
+        botPlan: botAdvance.botPlan,
       });
     });
   } catch (error) {
@@ -1317,7 +1325,8 @@ api.post("/match/play", async (c) => {
       if (result.ok) {
         advanceTutorialAfterAction(result.match, "play");
       }
-      next = runAiUntilHumanTurnWithStartDelay(result.match);
+      const botAdvance = await advanceBotTurnOrExposePlan(result.match);
+      next = botAdvance.match;
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1328,6 +1337,7 @@ api.post("/match/play", async (c) => {
           error: result.error,
           match: next,
         } satisfies MatchActionResult,
+        botPlan: botAdvance.botPlan,
       });
     });
   } catch (error) {
@@ -1385,7 +1395,8 @@ api.post("/match/attack", async (c) => {
       if (result.ok) {
         advanceTutorialAfterAction(result.match, "attack");
       }
-      next = runAiUntilHumanTurnWithStartDelay(result.match);
+      const botAdvance = await advanceBotTurnOrExposePlan(result.match);
+      next = botAdvance.match;
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1396,6 +1407,7 @@ api.post("/match/attack", async (c) => {
           error: result.error,
           match: next,
         } satisfies MatchActionResult,
+        botPlan: botAdvance.botPlan,
       });
     });
   } catch (error) {
@@ -1449,7 +1461,8 @@ api.post("/match/reposition-judge", async (c) => {
         });
       }
       const result = repositionJudgeSpecialist(next, body.action);
-      next = runAiUntilHumanTurnWithStartDelay(result.match);
+      const botAdvance = await advanceBotTurnOrExposePlan(result.match);
+      next = botAdvance.match;
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1460,6 +1473,7 @@ api.post("/match/reposition-judge", async (c) => {
           error: result.error,
           match: next,
         } satisfies MatchActionResult,
+        botPlan: botAdvance.botPlan,
       });
     });
   } catch (error) {
@@ -1525,7 +1539,8 @@ api.post("/match/end-turn", async (c) => {
         advanceTutorialAfterAction(progressed, "end-turn");
         next = progressed;
       }
-      next = runAiUntilHumanTurnWithStartDelay(next);
+      const botAdvance = await advanceBotTurnOrExposePlan(next);
+      next = botAdvance.match;
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1536,6 +1551,7 @@ api.post("/match/end-turn", async (c) => {
           error: result.error,
           match: next,
         } satisfies MatchActionResult,
+        botPlan: botAdvance.botPlan,
       });
     });
   } catch (error) {
@@ -1589,7 +1605,8 @@ api.post("/match/repay-naked-short", async (c) => {
         });
       }
       const result = repayNakedShort(next, body.action.side);
-      next = runAiUntilHumanTurnWithStartDelay(result.match);
+      const botAdvance = await advanceBotTurnOrExposePlan(result.match);
+      next = botAdvance.match;
 
       await finalizeIfFinished(storageRedis, wasFinished, next);
       await saveMatchIfChanged(storageRedis, next, loadedUpdatedAt);
@@ -1600,6 +1617,7 @@ api.post("/match/repay-naked-short", async (c) => {
           error: result.error,
           match: next,
         } satisfies MatchActionResult,
+        botPlan: botAdvance.botPlan,
       });
     });
   } catch (error) {

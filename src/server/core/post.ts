@@ -26,6 +26,51 @@ type PostWeekResultFail = {
   error: string;
 };
 
+const LEGAL_MONTH_ABBREVIATIONS = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "Jun.", "Jul.", "Aug.", "Sep.", "Oct.", "Nov.", "Dec."] as const;
+
+function ordinalSuffix(day: number): string {
+  const mod100 = day % 100;
+  if (mod100 >= 11 && mod100 <= 13) {
+    return "th";
+  }
+  const mod10 = day % 10;
+  if (mod10 === 1) return "st";
+  if (mod10 === 2) return "nd";
+  if (mod10 === 3) return "rd";
+  return "th";
+}
+
+function formatWeeklyCaseDateFromWeekId(weekId: string): string | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(weekId);
+  if (!match) {
+    return null;
+  }
+  const [, yearText, monthText, dayText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+  // Week IDs are Sunday anchors; display the Monday date in title copy.
+  const displayDate = new Date(Date.UTC(year, month - 1, day + 1));
+  if (Number.isNaN(displayDate.getTime())) {
+    return null;
+  }
+  const monthLabel = LEGAL_MONTH_ABBREVIATIONS[displayDate.getUTCMonth()];
+  const displayDay = displayDate.getUTCDate();
+  const displayYearShort = String(displayDate.getUTCFullYear()).slice(-2);
+  return `${monthLabel} ${displayDay}${ordinalSuffix(displayDay)} '${displayYearShort}`;
+}
+
+function weeklyPostTitle(weekId: string, weekNumber: number): string {
+  const formattedDate = formatWeeklyCaseDateFromWeekId(weekId);
+  if (!formattedDate) {
+    return `Court of Capital - Weekly Case (#${weekNumber}, ${weekId})`;
+  }
+  return `Court of Capital - Weekly Case (#${weekNumber}, ${formattedDate})`;
+}
+
 function readWeekId(postData: unknown): string | null {
   if (!postData || typeof postData !== "object") {
     return null;
@@ -47,7 +92,7 @@ export async function createWeeklyPost(
   const createdAt = nowTs();
   const post = await context.reddit.submitCustomPost({
     subredditName: context.subredditName,
-    title: `Court of Capital - Weekly Court (#${weekNumber} ${weekId})`,
+    title: weeklyPostTitle(weekId, weekNumber),
     entry: "default",
     postData: {
       weekId,

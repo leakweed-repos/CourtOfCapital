@@ -12,6 +12,8 @@ import {
 import { getCardPreview, getDisplayAbilitiesLine } from "../shared/cards";
 import {
   type EventUnitState,
+  type BotPlannedAction,
+  type BotTurnPlanPublic,
   JUDGE_COL,
   type MatchLogEntry,
   normalizeUsername,
@@ -67,6 +69,18 @@ type CoachmarkPosition = {
 };
 
 type LobbyTab = "quick" | "pvp" | "tutorial";
+
+type BotGhostPreviewSlot = {
+  sideLabel: "ally" | "enemy";
+  lane: "front" | "back";
+  col: number;
+  cardId: string;
+  cardName: string;
+};
+
+function botGhostSlotKey(sideLabel: "ally" | "enemy", lane: "front" | "back", col: number): string {
+  return `${sideLabel}:${lane}:${col}`;
+}
 
 const FACTIONS: Array<{ id: FactionId; label: string; motto: string; tone: string }> = [
   { id: "retail_mob", label: "Retail Mob", motto: "Momentum swarms", tone: "wide board + spikes" },
@@ -547,6 +561,24 @@ function BoardUnitTile({ unit, turn }: { unit: MatchState["units"][string]; turn
   );
 }
 
+function BotGhostUnitTile({ cardId, cardName }: { cardId: string; cardName: string }) {
+  const card = getCardPreview(cardId);
+  const avatarPath = handOnboardArtPath(card);
+  return (
+    <div className="bot-ghost-tile" aria-hidden="true">
+      <img
+        className={`bot-ghost-avatar${card.traits.includes("taunt") ? " bot-ghost-avatar--taunt" : ""}`}
+        src={avatarPath}
+        data-fallback-src={HAND_ONBOARD_FALLBACK_PATH}
+        alt=""
+        loading="lazy"
+        onError={applyArtFallback}
+      />
+      <span className="bot-ghost-name">{compactName(cardName || card.name || "Incoming", 11)}</span>
+    </div>
+  );
+}
+
 export function GameApp() {
   const ctx = useMemo(readContext, []);
   const webViewMode = getWebViewMode();
@@ -605,6 +637,7 @@ export function GameApp() {
   const [enemyInspectUnitId, setEnemyInspectUnitId] = useState<string | null>(null);
   const [enemyInspectEventId, setEnemyInspectEventId] = useState<string | null>(null);
   const [enemyInspectJudge, setEnemyInspectJudge] = useState(false);
+  const [botGhostPreviewByUnitId, setBotGhostPreviewByUnitId] = useState<Record<string, BotGhostPreviewSlot>>({});
   const [coachmarkPosition, setCoachmarkPosition] = useState<CoachmarkPosition | null>(null);
   const actionRequestInFlightRef = useRef(false);
   const attackInputCooldownUntilRef = useRef(0);
@@ -613,6 +646,10 @@ export function GameApp() {
   const matchRef = useRef<MatchState | null>(null);
   const matchRequestSeqRef = useRef(0);
   const matchAppliedRequestSeqRef = useRef(0);
+  const activeBotPlanIdRef = useRef<string | null>(null);
+  const botPlanPreviewTimersRef = useRef<number[]>([]);
+  const botPlanPreviewOverlayNodesRef = useRef<HTMLElement[]>([]);
+  const botGhostSlotsByUnitIdRef = useRef<Record<string, BotGhostPreviewSlot>>({});
   const seenLogCursorRef = useRef<{ matchId: string; index: number } | null>(null);
   const battleShellRef = useRef<HTMLElement | null>(null);
 
@@ -635,6 +672,237 @@ export function GameApp() {
   function openStatusGuide(key: UnitStatusTokenKey): void {
     setActiveStatusGuideKey(key);
     setShowStatusGuide(true);
+  }
+
+  function clearBotPlanPreviewTimers(): void {
+    for (const timerId of botPlanPreviewTimersRef.current) {
+      window.clearTimeout(timerId);
+    }
+    botPlanPreviewTimersRef.current = [];
+  }
+
+  function clearBotPlanPreviewOverlays(): void {
+    for (const node of botPlanPreviewOverlayNodesRef.current) {
+      node.remove();
+    }
+    botPlanPreviewOverlayNodesRef.current = [];
+  }
+
+  function stopBotPlanPreview(): void {
+    activeBotPlanIdRef.current = null;
+    botGhostSlotsByUnitIdRef.current = {};
+    setBotGhostPreviewByUnitId({});
+    clearBotPlanPreviewTimers();
+    clearBotPlanPreviewOverlays();
+  }
+
+  function pulseBotPreviewElement(el: Element | null, variant: "slot" | "target" | "source" | "attack-source" = "slot"): void {
+    if (!el) {
+      return;
+    }
+    const cls =
+      variant === "target"
+        ? "bot-plan-preview-target"
+        : variant === "attack-source"
+          ? "bot-plan-preview-attack-source"
+        : variant === "source"
+          ? "bot-plan-preview-source"
+          : "bot-plan-preview-slot";
+    el.classList.add(cls);
+    const removeAfterMs = variant === "target" || variant === "attack-source" ? 1000 : 420;
+    const timer = window.setTimeout(() => el.classList.remove(cls), removeAfterMs);
+    botPlanPreviewTimersRef.current.push(timer);
+  }
+
+  function botPlanSideLabel(planSide: PlayerSide, mySide: PlayerSide | null): "ally" | "enemy" {
+    if (!mySide) {
+      return "enemy";
+    }
+    return planSide === mySide ? "ally" : "enemy";
+  }
+
+  function findBoardSlotElementForPreview(
+    sideLabel: "ally" | "enemy",
+    lane: "front" | "back",
+    col: number,
+  ): Element | null {
+    return document.querySelector(`[data-coach-slot="${sideLabel}-${lane}-${col}"]`);
+  }
+
+  function findLeaderTargetElementForPreview(targetSide: PlayerSide, mySide: PlayerSide | null): Element | null {
+    const sideLabel = mySide && targetSide === mySide ? "you" : "enemy";
+    return document.querySelector(`[data-leader-target="${sideLabel}"]`);
+  }
+
+  function findUnitElementForPreview(unitId: string): Element | null {
+    return (
+      document.querySelector(`[data-unit-id="${unitId}"]`) ??
+      document.querySelector(`[data-owned-unit-id="${unitId}"]`)
+    );
+  }
+
+  function resolveBotPreviewUnitCardId(unitId: string | undefined, visibleMatch: MatchState): string | null {
+    if (!unitId) {
+      return null;
+    }
+    const liveUnit = visibleMatch.units[unitId];
+    if (liveUnit?.cardId) {
+      return liveUnit.cardId;
+    }
+    const ghost = botGhostSlotsByUnitIdRef.current[unitId];
+    return ghost?.cardId ?? null;
+  }
+
+  function spawnBotAttackAvatarOverlay(targetEl: Element | null, attackerCardId: string | null): void {
+    if (!(targetEl instanceof HTMLElement) || !attackerCardId) {
+      return;
+    }
+    const targetCard = getCardPreview(attackerCardId);
+    const overlay = document.createElement("div");
+    overlay.className = "bot-plan-attack-avatar-overlay";
+    const img = document.createElement("img");
+    img.className = `bot-plan-attack-avatar${targetCard.traits.includes("taunt") ? " bot-plan-attack-avatar--taunt" : ""}`;
+    img.src = handOnboardArtPath(targetCard);
+    img.alt = "";
+    img.setAttribute("aria-hidden", "true");
+    img.dataset.fallbackSrc = HAND_ONBOARD_FALLBACK_PATH;
+    img.onerror = () => {
+      const fallback = img.dataset.fallbackSrc;
+      if (fallback && img.src !== fallback) {
+        img.src = fallback;
+      }
+    };
+    overlay.appendChild(img);
+    targetEl.appendChild(overlay);
+    botPlanPreviewOverlayNodesRef.current.push(overlay);
+    const timer = window.setTimeout(() => {
+      overlay.remove();
+      botPlanPreviewOverlayNodesRef.current = botPlanPreviewOverlayNodesRef.current.filter((node) => node !== overlay);
+    }, 560);
+    botPlanPreviewTimersRef.current.push(timer);
+  }
+
+  function playBotPlanActionPreview(
+    plan: BotTurnPlanPublic,
+    action: BotPlannedAction,
+    mySide: PlayerSide | null,
+    visibleMatch: MatchState,
+  ): void {
+    const actingSideLabel = botPlanSideLabel(plan.side, mySide);
+
+    if (action.kind === "play_unit") {
+      const slotEl = findBoardSlotElementForPreview(actingSideLabel, action.lane, action.col);
+      pulseBotPreviewElement(slotEl, "slot");
+      if (action.unitId) {
+        const unitId = action.unitId;
+        const ghostSlot: BotGhostPreviewSlot = {
+          sideLabel: actingSideLabel,
+          lane: action.lane,
+          col: action.col,
+          cardId: action.cardId,
+          cardName: action.cardName,
+        };
+        botGhostSlotsByUnitIdRef.current[unitId] = ghostSlot;
+        setBotGhostPreviewByUnitId((prev) => ({ ...prev, [unitId]: ghostSlot }));
+      }
+      return;
+    }
+
+    if (action.kind === "play_non_unit") {
+      if (action.target?.kind === "ally-unit" || action.target?.kind === "enemy-unit") {
+        pulseBotPreviewElement(findUnitElementForPreview(action.target.unitId), "target");
+        return;
+      }
+      if (action.target?.kind === "ally-leader") {
+        pulseBotPreviewElement(findLeaderTargetElementForPreview(plan.side, mySide), "target");
+        return;
+      }
+      if (action.target?.kind === "enemy-leader") {
+        pulseBotPreviewElement(findLeaderTargetElementForPreview(enemyOf(plan.side), mySide), "target");
+        return;
+      }
+      pulseBotPreviewElement(document.querySelector('[data-judge-target="true"]'), "slot");
+      return;
+    }
+
+    if (action.kind === "judge_action") {
+      const attackerEl = action.attackerUnitId ? findUnitElementForPreview(action.attackerUnitId) : null;
+      // Reserved for future ghost-card rendering during bot previews.
+      const ghost = action.attackerUnitId ? botGhostSlotsByUnitIdRef.current[action.attackerUnitId] : undefined;
+      const sourceEl = attackerEl ?? (ghost ? findBoardSlotElementForPreview(ghost.sideLabel, ghost.lane, ghost.col) : null);
+      pulseBotPreviewElement(sourceEl, "source");
+      pulseBotPreviewElement(document.querySelector('[data-judge-target="true"]'), "target");
+      return;
+    }
+
+    if (action.kind === "attack") {
+      let sourceEl: Element | null = action.attackerUnitId ? findUnitElementForPreview(action.attackerUnitId) : null;
+      if (!sourceEl && action.attackerUnitId) {
+        const ghost = botGhostSlotsByUnitIdRef.current[action.attackerUnitId];
+        if (ghost) {
+          sourceEl = findBoardSlotElementForPreview(ghost.sideLabel, ghost.lane, ghost.col);
+        }
+      }
+      pulseBotPreviewElement(sourceEl, "attack-source");
+      const attackerCardId = resolveBotPreviewUnitCardId(action.attackerUnitId, visibleMatch);
+
+      if (action.target.kind === "leader") {
+        pulseBotPreviewElement(findLeaderTargetElementForPreview(enemyOf(plan.side), mySide), "target");
+        return;
+      }
+      if (action.target.kind === "judge") {
+        pulseBotPreviewElement(document.querySelector('[data-judge-target="true"]'), "target");
+        return;
+      }
+      if (action.target.kind === "unit") {
+        const targetEl = findUnitElementForPreview(action.target.unitId);
+        pulseBotPreviewElement(targetEl, "target");
+        spawnBotAttackAvatarOverlay(targetEl, attackerCardId);
+        return;
+      }
+      const targetEl = document.querySelector(`[data-event-id="${action.target.eventUnitId}"]`);
+      pulseBotPreviewElement(targetEl, "target");
+      spawnBotAttackAvatarOverlay(targetEl, attackerCardId);
+      return;
+    }
+  }
+
+  function syncBotPlanPreview(plan: BotTurnPlanPublic | undefined, visibleMatch: MatchState): void {
+    const mySide = sideForUser(visibleMatch, ctx.userId);
+    if (!plan) {
+      stopBotPlanPreview();
+      return;
+    }
+
+    if (activeBotPlanIdRef.current === plan.id) {
+      return;
+    }
+
+    stopBotPlanPreview();
+    activeBotPlanIdRef.current = plan.id;
+
+    const now = Date.now();
+    for (let i = 0; i < plan.actions.length; i += 1) {
+      const action = plan.actions[i];
+      if (!action) {
+        continue;
+      }
+      const offsetMs = Math.max(0, (plan.timelineMs[i] ?? 0) - (now - plan.createdAt));
+      const timer = window.setTimeout(() => {
+        if (activeBotPlanIdRef.current !== plan.id) {
+          return;
+        }
+        playBotPlanActionPreview(plan, action, mySide, visibleMatch);
+      }, offsetMs);
+      botPlanPreviewTimersRef.current.push(timer);
+    }
+
+    const doneTimer = window.setTimeout(() => {
+      if (activeBotPlanIdRef.current === plan.id) {
+        stopBotPlanPreview();
+      }
+    }, Math.max(0, plan.readyAt - now) + 1200);
+    botPlanPreviewTimersRef.current.push(doneTimer);
   }
 
   async function loadLobby(): Promise<void> {
@@ -705,6 +973,7 @@ export function GameApp() {
     matchAppliedRequestSeqRef.current = requestSeq;
     matchRef.current = nextMatch;
     setMatch(nextMatch);
+    syncBotPlanPreview(response.data.botPlan, nextMatch);
   }
 
   async function startAi(level: 1 | 2 | 3): Promise<void> {
@@ -728,8 +997,12 @@ export function GameApp() {
     }
 
     setInfo(`Started AI level ${level}.`);
+    stopBotPlanPreview();
     matchRef.current = response.data.result.match;
     setMatch(response.data.result.match);
+    if (response.data.botPlan) {
+      syncBotPlanPreview(response.data.botPlan, response.data.result.match);
+    }
     setSelectedHandIndex(null);
   }
 
@@ -753,6 +1026,7 @@ export function GameApp() {
     }
 
     setInfo(`${tutorialScenarioLabel(scenarioId)} started.`);
+    stopBotPlanPreview();
     matchRef.current = response.data.result.match;
     setMatch(response.data.result.match);
     setSelectedHandIndex(null);
@@ -901,6 +1175,7 @@ export function GameApp() {
     if (response.data.result?.ok && response.data.result.match) {
       activePvpLobbyRef.current = null;
       setActivePvpLobby(null);
+      stopBotPlanPreview();
       matchRef.current = response.data.result.match;
       setMatch(response.data.result.match);
       setSelectedHandIndex(null);
@@ -972,6 +1247,7 @@ export function GameApp() {
       matchAppliedRequestSeqRef.current = requestSeq;
       matchRef.current = nextMatch;
       setMatch(nextMatch);
+      syncBotPlanPreview(response.data.botPlan, nextMatch);
       return;
     }
 
@@ -989,22 +1265,11 @@ export function GameApp() {
       return;
     }
     setError("");
-    if (
-      shouldDiscardMatchResponse({
-        requestSeq,
-        latestAppliedRequestSeq: matchAppliedRequestSeqRef.current,
-        allowSwitch: true,
-        requestedMatchId: match.id,
-        currentMatch: matchRef.current,
-        incomingMatch: nextMatch,
-      })
-    ) {
-      return;
-    }
 
     matchAppliedRequestSeqRef.current = requestSeq;
     matchRef.current = nextMatch;
     setMatch(nextMatch);
+    syncBotPlanPreview(response.data.botPlan, nextMatch);
     if (options?.clearArmed !== false) {
       setArmedAttackerUnitId(null);
     }
@@ -1042,6 +1307,7 @@ export function GameApp() {
       return;
     }
     setInfo("Tutorial skipped.");
+    stopBotPlanPreview();
     setMatch(null);
     setSelectedHandIndex(null);
     setMulliganPick([]);
@@ -1548,6 +1814,43 @@ export function GameApp() {
   const hudTurnLabel = `Turn ${match?.turn ?? 0}`;
   const hudFlowLabel = isMyTurn ? "Your turn" : `Side ${match?.activeSide ?? "-"}`;
   const activeStatusGuide = STATUS_LEGEND.find((status) => status.key === activeStatusGuideKey) || STATUS_LEGEND[0];
+  const botGhostPreviewBySlot = useMemo(() => {
+    const bySlot: Record<string, BotGhostPreviewSlot> = {};
+    for (const ghost of Object.values(botGhostPreviewByUnitId)) {
+      bySlot[botGhostSlotKey(ghost.sideLabel, ghost.lane, ghost.col)] = ghost;
+    }
+    return bySlot;
+  }, [botGhostPreviewByUnitId]);
+
+  useEffect(() => () => {
+    activeBotPlanIdRef.current = null;
+    botGhostSlotsByUnitIdRef.current = {};
+    setBotGhostPreviewByUnitId({});
+    for (const timerId of botPlanPreviewTimersRef.current) {
+      window.clearTimeout(timerId);
+    }
+    botPlanPreviewTimersRef.current = [];
+    for (const node of botPlanPreviewOverlayNodesRef.current) {
+      node.remove();
+    }
+    botPlanPreviewOverlayNodesRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    if (!match) {
+      activeBotPlanIdRef.current = null;
+      botGhostSlotsByUnitIdRef.current = {};
+      setBotGhostPreviewByUnitId({});
+      for (const timerId of botPlanPreviewTimersRef.current) {
+        window.clearTimeout(timerId);
+      }
+      botPlanPreviewTimersRef.current = [];
+      for (const node of botPlanPreviewOverlayNodesRef.current) {
+        node.remove();
+      }
+      botPlanPreviewOverlayNodesRef.current = [];
+    }
+  }, [match]);
 
   useEffect(() => {
     if (!tutorialState?.paused) {
@@ -2177,6 +2480,7 @@ export function GameApp() {
 
                   <div className="board-fit" ref={boardFitRef}>
                     <div className="board-grid compact-all" style={boardSizePx ? { width: "100%" } : undefined}>
+                      {/* Ghost cards are preview-only placeholders for upcoming bot plays; real units still come from match state. */}
                       {enemyPlayer.board.back.map((unitId, col) => (
                         <button
                           key={`enemy-b-${col}`}
@@ -2206,6 +2510,11 @@ export function GameApp() {
                         >
                           {unitId && match.units[unitId] ? (
                             <BoardUnitTile unit={match.units[unitId]!} turn={match.turn} />
+                          ) : botGhostPreviewBySlot[botGhostSlotKey("enemy", "back", col)] ? (
+                            <BotGhostUnitTile
+                              cardId={botGhostPreviewBySlot[botGhostSlotKey("enemy", "back", col)]!.cardId}
+                              cardName={botGhostPreviewBySlot[botGhostSlotKey("enemy", "back", col)]!.cardName}
+                            />
                           ) : (
                             "-"
                           )}
@@ -2241,6 +2550,11 @@ export function GameApp() {
                         >
                           {unitId && match.units[unitId] ? (
                             <BoardUnitTile unit={match.units[unitId]!} turn={match.turn} />
+                          ) : botGhostPreviewBySlot[botGhostSlotKey("enemy", "front", col)] ? (
+                            <BotGhostUnitTile
+                              cardId={botGhostPreviewBySlot[botGhostSlotKey("enemy", "front", col)]!.cardId}
+                              cardName={botGhostPreviewBySlot[botGhostSlotKey("enemy", "front", col)]!.cardName}
+                            />
                           ) : (
                             "-"
                           )}
@@ -2301,6 +2615,7 @@ export function GameApp() {
                       {myPlayer.board.front.map((unitId, col) => {
                         if (!unitId) {
                           const legalDrop = canDropSelectedToSlot("front", col, false);
+                          const ghost = botGhostPreviewBySlot[botGhostSlotKey("ally", "front", col)];
                           return (
                             <button
                               key={`my-f-${col}`}
@@ -2314,19 +2629,21 @@ export function GameApp() {
                                 clearActiveSelection({ clearEnemyInspect: true });
                               }}
                             >
-                              +
+                              {ghost ? <BotGhostUnitTile cardId={ghost.cardId} cardName={ghost.cardName} /> : "+"}
                             </button>
                           );
                         }
 
+                        const unit = match.units[unitId]!;
+                        const spentAttack = unit.cannotAttackUntilTurn > match.turn;
                         return (
                           <button
                             key={`my-f-${col}`}
-                            className={`slot friendly own ${col === JUDGE_COL ? "judge-green" : ""} ${armedAttackerUnitId === unitId ? "armed" : ""} ${expectsAllyUnitTarget ? "effect-target" : ""} ${canDropSelectedToSlot("front", col, true) ? "flip-target" : ""} ${tutorialState?.coachAnchorKind === "slot" && tutorialState.coachSide === "ally" && tutorialState.coachLane === "front" && tutorialState.coachCol === col ? "tutorial-emphasis" : ""}`}
+                            className={`slot friendly own ${col === JUDGE_COL ? "judge-green" : ""} ${armedAttackerUnitId === unitId ? "armed" : ""} ${spentAttack ? "spent-attack" : ""} ${expectsAllyUnitTarget ? "effect-target" : ""} ${canDropSelectedToSlot("front", col, true) ? "flip-target" : ""} ${tutorialState?.coachAnchorKind === "slot" && tutorialState.coachSide === "ally" && tutorialState.coachLane === "front" && tutorialState.coachCol === col ? "tutorial-emphasis" : ""}`}
                             data-owned-unit-id={unitId}
                             data-coach-slot={`ally-front-${col}`}
                             data-slot-owner={mySide ?? undefined}
-                            data-slot-name={match.units[unitId]?.name ?? undefined}
+                            data-slot-name={unit.name ?? undefined}
                             onClick={() => {
                               if (canDropSelectedToSlot("front", col, true)) {
                                 playSelectedTo("front", col);
@@ -2336,7 +2653,7 @@ export function GameApp() {
                                 playSelectedOnTarget({ kind: "ally-unit", unitId });
                                 return;
                               }
-                              setAllyInspectCardId(match.units[unitId]?.cardId ?? null);
+                              setAllyInspectCardId(unit.cardId ?? null);
                               setSelectedHandIndex(null);
                               setArmedAttackerUnitId((prev) => (prev === unitId ? null : unitId));
                             }}
@@ -2352,7 +2669,7 @@ export function GameApp() {
                               endDragAttack(e, mySide);
                             }}
                           >
-                            <BoardUnitTile unit={match.units[unitId]!} turn={match.turn} />
+                            <BoardUnitTile unit={unit} turn={match.turn} />
                           </button>
                         );
                       })}
@@ -2360,6 +2677,7 @@ export function GameApp() {
                       {myPlayer.board.back.map((unitId, col) => {
                         if (!unitId) {
                           const legalDrop = canDropSelectedToSlot("back", col, false);
+                          const ghost = botGhostPreviewBySlot[botGhostSlotKey("ally", "back", col)];
                           return (
                             <button
                               key={`my-b-${col}`}
@@ -2373,19 +2691,21 @@ export function GameApp() {
                                 clearActiveSelection({ clearEnemyInspect: true });
                               }}
                             >
-                              +
+                              {ghost ? <BotGhostUnitTile cardId={ghost.cardId} cardName={ghost.cardName} /> : "+"}
                             </button>
                           );
                         }
 
+                        const unit = match.units[unitId]!;
+                        const spentAttack = unit.cannotAttackUntilTurn > match.turn;
                         return (
                           <button
                             key={`my-b-${col}`}
-                            className={`slot friendly own ${col === JUDGE_COL ? "judge-blue" : ""} ${armedAttackerUnitId === unitId ? "armed" : ""} ${expectsAllyUnitTarget ? "effect-target" : ""} ${canDropSelectedToSlot("back", col, true) ? "flip-target" : ""} ${tutorialState?.coachAnchorKind === "slot" && tutorialState.coachSide === "ally" && tutorialState.coachLane === "back" && tutorialState.coachCol === col ? "tutorial-emphasis" : ""}`}
+                            className={`slot friendly own ${col === JUDGE_COL ? "judge-blue" : ""} ${armedAttackerUnitId === unitId ? "armed" : ""} ${spentAttack ? "spent-attack" : ""} ${expectsAllyUnitTarget ? "effect-target" : ""} ${canDropSelectedToSlot("back", col, true) ? "flip-target" : ""} ${tutorialState?.coachAnchorKind === "slot" && tutorialState.coachSide === "ally" && tutorialState.coachLane === "back" && tutorialState.coachCol === col ? "tutorial-emphasis" : ""}`}
                             data-owned-unit-id={unitId}
                             data-coach-slot={`ally-back-${col}`}
                             data-slot-owner={mySide ?? undefined}
-                            data-slot-name={match.units[unitId]?.name ?? undefined}
+                            data-slot-name={unit.name ?? undefined}
                             onClick={() => {
                               if (canDropSelectedToSlot("back", col, true)) {
                                 playSelectedTo("back", col);
@@ -2395,7 +2715,7 @@ export function GameApp() {
                                 playSelectedOnTarget({ kind: "ally-unit", unitId });
                                 return;
                               }
-                              setAllyInspectCardId(match.units[unitId]?.cardId ?? null);
+                              setAllyInspectCardId(unit.cardId ?? null);
                               setSelectedHandIndex(null);
                               setArmedAttackerUnitId((prev) => (prev === unitId ? null : unitId));
                             }}
@@ -2411,7 +2731,7 @@ export function GameApp() {
                               endDragAttack(e, mySide);
                             }}
                           >
-                            <BoardUnitTile unit={match.units[unitId]!} turn={match.turn} />
+                            <BoardUnitTile unit={unit} turn={match.turn} />
                           </button>
                         );
                       })}

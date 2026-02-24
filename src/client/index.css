@@ -1944,6 +1944,8 @@ button {
 .slot {
   min-width: 0;
   min-height: 34px;
+  position: relative;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #121f3d;
@@ -1957,6 +1959,52 @@ button {
   line-height: 1.12;
   user-select: none;
   transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+.bot-ghost-tile {
+  position: absolute;
+  inset: 1px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 2px;
+  border-radius: 7px;
+  background:
+    radial-gradient(circle at 50% 30%, rgba(92, 180, 255, 0.14), rgba(23, 38, 73, 0.2)),
+    linear-gradient(180deg, rgba(18, 28, 53, 0.85), rgba(10, 16, 31, 0.9));
+  border: 1px dashed rgba(112, 188, 255, 0.65);
+  box-shadow: inset 0 0 0 1px rgba(84, 160, 255, 0.12), 0 0 16px rgba(75, 140, 220, 0.14);
+  pointer-events: none;
+  z-index: 2;
+  animation: botGhostFadeIn 180ms ease-out;
+}
+
+.bot-ghost-avatar {
+  width: 4.6em;
+  height: 4.6em;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid rgba(128, 178, 255, 0.75);
+  opacity: 0.64;
+  filter: saturate(0.85) brightness(1.05);
+  box-shadow: 0 2px 8px rgba(8, 16, 30, 0.35);
+}
+
+.bot-ghost-avatar--taunt {
+  border-color: rgba(245, 214, 124, 0.95);
+  box-shadow: 0 0 0 1px rgba(245, 214, 124, 0.4), 0 0 10px rgba(236, 191, 72, 0.22);
+}
+
+.bot-ghost-name {
+  max-width: calc(100% - 4px);
+  font-size: 0.44rem;
+  line-height: 1.05;
+  color: #cfe5ff;
+  opacity: 0.85;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .slot-body {
@@ -2202,6 +2250,21 @@ button {
   border-color: #64a7ff;
 }
 
+.slot.friendly.own.spent-attack {
+  transform: translateY(1px) scale(0.995);
+  border-color: rgba(100, 167, 255, 0.45);
+  box-shadow: inset 0 2px 8px rgba(5, 12, 24, 0.48), inset 0 0 0 1px rgba(100, 167, 255, 0.12);
+  filter: saturate(0.92);
+}
+
+.slot.friendly.own.spent-attack .board-unit-tile {
+  opacity: 0.72;
+}
+
+.slot.friendly.own.spent-attack .board-unit-avatar {
+  filter: saturate(0.9) brightness(0.95);
+}
+
 .slot.friendly.drop {
   border-color: #4dd2aa;
 }
@@ -2273,6 +2336,47 @@ button {
   animation: hitFlash 180ms ease-out;
 }
 
+.bot-plan-preview-slot {
+  animation: botPlanSlotPulse 420ms ease-out;
+}
+
+.bot-plan-preview-source {
+  animation: botPlanSourcePulse 420ms ease-out;
+}
+
+.bot-plan-preview-attack-source {
+  animation: botPlanAttackSourcePulse 1000ms ease-out;
+}
+
+.bot-plan-preview-target {
+  animation: botPlanTargetPulse 1000ms ease-out;
+}
+
+.bot-plan-attack-avatar-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.bot-plan-attack-avatar {
+  width: 4.9em;
+  height: 4.9em;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 2px solid rgba(255, 132, 165, 0.95);
+  box-shadow: 0 0 0 1px rgba(255, 86, 137, 0.55), 0 0 18px rgba(255, 78, 124, 0.28);
+  filter: saturate(1.08) brightness(1.06);
+  animation: botPlanAttackAvatarLand 560ms ease-out forwards;
+}
+
+.bot-plan-attack-avatar--taunt {
+  outline: 1px solid rgba(247, 224, 152, 0.95);
+  outline-offset: 2px;
+}
+
 @keyframes hitFlash {
   0% {
     filter: brightness(1);
@@ -2287,6 +2391,116 @@ button {
   100% {
     filter: brightness(1);
     transform: scale(1);
+  }
+}
+
+@keyframes botGhostFadeIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes botPlanSlotPulse {
+  0% {
+    box-shadow: inset 0 0 0 0 rgba(117, 203, 255, 0);
+    filter: brightness(1);
+  }
+
+  45% {
+    box-shadow: inset 0 0 0 2px rgba(117, 203, 255, 0.95), 0 0 18px rgba(80, 178, 255, 0.35);
+    filter: brightness(1.14);
+  }
+
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(117, 203, 255, 0);
+    filter: brightness(1);
+  }
+}
+
+@keyframes botPlanSourcePulse {
+  0% {
+    box-shadow: inset 0 0 0 0 rgba(255, 215, 122, 0);
+    filter: brightness(1);
+  }
+
+  45% {
+    box-shadow: inset 0 0 0 2px rgba(255, 215, 122, 0.95), 0 0 18px rgba(255, 193, 77, 0.3);
+    filter: brightness(1.12);
+  }
+
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(255, 215, 122, 0);
+    filter: brightness(1);
+  }
+}
+
+@keyframes botPlanTargetPulse {
+  0% {
+    box-shadow: inset 0 0 0 0 rgba(255, 126, 164, 0);
+    filter: brightness(1);
+  }
+
+  18% {
+    box-shadow: inset 0 0 0 2px rgba(255, 126, 164, 0.95), 0 0 20px rgba(255, 96, 144, 0.35);
+    filter: brightness(1.14);
+  }
+
+  55% {
+    box-shadow: inset 0 0 0 1px rgba(255, 126, 164, 0.42), 0 0 12px rgba(255, 96, 144, 0.16);
+    filter: brightness(1.06);
+  }
+
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(255, 126, 164, 0);
+    filter: brightness(1);
+  }
+}
+
+@keyframes botPlanAttackSourcePulse {
+  0% {
+    box-shadow: inset 0 0 0 0 rgba(255, 138, 164, 0);
+    filter: brightness(1);
+  }
+
+  18% {
+    box-shadow: inset 0 0 0 2px rgba(255, 138, 164, 0.95), 0 0 20px rgba(255, 90, 126, 0.34);
+    filter: brightness(1.15);
+  }
+
+  55% {
+    box-shadow: inset 0 0 0 1px rgba(255, 138, 164, 0.42), 0 0 12px rgba(255, 90, 126, 0.15);
+    filter: brightness(1.07);
+  }
+
+  100% {
+    box-shadow: inset 0 0 0 0 rgba(255, 138, 164, 0);
+    filter: brightness(1);
+  }
+}
+
+@keyframes botPlanAttackAvatarLand {
+  0% {
+    opacity: 0;
+    transform: scale(0.86);
+    filter: saturate(1.08) brightness(1.2);
+  }
+
+  35% {
+    opacity: 0.95;
+    transform: scale(1.03);
+    filter: saturate(1.1) brightness(1.12);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1);
+    filter: saturate(1.05) brightness(1.03);
   }
 }
 

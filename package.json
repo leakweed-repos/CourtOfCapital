@@ -30,8 +30,9 @@
     "test:phase2-hardening": "tsx tools/test-phase2-hardening.ts",
     "test:phase3-polling": "tsx tools/test-phase3-polling.ts",
     "test:phase4-consistency": "tsx tools/test-phase4-consistency.ts",
+    "test:bot-plan": "tsx tools/test-bot-plan.ts",
     "test:leader-rules": "tsx tools/test-leader-rules.ts",
-    "test": "npm run test:cards-v2-pilot && npm run test:cards-v2-runtime && npm run test:phase1-integrity && npm run test:phase2-hardening && npm run test:phase3-polling && npm run test:phase4-consistency && npm run test:leader-rules && npm run sim:balance",
+    "test": "npm run test:cards-v2-pilot && npm run test:cards-v2-runtime && npm run test:phase1-integrity && npm run test:phase2-hardening && npm run test:phase3-polling && npm run test:phase4-consistency && npm run test:bot-plan && npm run test:leader-rules && npm run sim:balance",
     "dev:det": "npm run sim:balance:det",
     "type-check": "tsc --build"
   },
